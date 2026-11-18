@@ -43,7 +43,7 @@ service cloud.firestore {
     }
 
     function isValidHouseholdId(id) {
-      return id is string && id.size() == 17 && id.matches('^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$');
+      return id is string && id.size() == 16 && id.matches('^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$');
     }
 
     function staffPath(email) {

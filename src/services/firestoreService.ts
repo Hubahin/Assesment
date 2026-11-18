@@ -408,14 +408,14 @@ export async function createHouseholdListingTransactional(
         rt: rtPad,
         rtKey,
         urutan: nextNumber,
-        no_bangunan: params.no_bangunan.trim(),
-        nama_kk_daftar: params.nama_kk_daftar.trim(),
-        alamat: params.alamat.trim(),
+        no_bangunan: params.no_bangunan.trim().slice(0, 30),
+        nama_kk_daftar: params.nama_kk_daftar.trim().slice(0, 150),
+        alamat: params.alamat.trim().slice(0, 300),
         sumber: params.sumber,
         status_daftar: 'aktif',
         status_cacah: 'belum_dikunjungi',
         verifikasi_status: 'belum',
-        createdBy: actorEmail.toLowerCase(),
+        createdBy: actorEmail.toLowerCase().slice(0, 200),
       };
 
       tx.set(counterRef, {
@@ -618,16 +618,16 @@ export async function submitHouseholdCensus(params: {
     if (cleaned.modulB) updatePayload.modulB = cleaned.modulB;
     if (cleaned.modulC) updatePayload.modulC = cleaned.modulC;
 
-    await updateDoc(doc(db, 'households', existingHousehold.id_rt), updatePayload);
+    await updateDoc(doc(db, 'households', existingHousehold.id_rt), stripUndefined(updatePayload));
 
     // 2. Write separated PII document (NIK & No KK)
-    await setDoc(doc(db, 'household_pii', existingHousehold.id_rt), {
+    await setDoc(doc(db, 'household_pii', existingHousehold.id_rt), stripUndefined({
       id_rt: existingHousehold.id_rt,
       rtKey: existingHousehold.rtKey,
       membersPii: cleaned.membersPii,
-      updatedBy: emailLower,
+      updatedBy: emailLower.slice(0, 200),
       updatedAt: serverTimestamp(),
-    });
+    }));
 
     // 3. Write compressed photo if present
     if (draft.fotoDataUrl) {
@@ -672,7 +672,7 @@ export async function submitHouseholdCensus(params: {
 
     // 5. Log post-submit revisions if previously submitted
     if (isPostSubmitRevision) {
-      const reason = (revisionReason || 'Perbaikan isian setelah dikirim').trim();
+      const reason = (revisionReason || 'Perbaikan isian setelah dikirim').trim().slice(0, 500);
       const diffs = [
         ...computeJsonDiffs('modul0', existingHousehold.modul0 || {}, cleaned.modul0),
         ...computeJsonDiffs('modulA', existingHousehold.modulA || {}, cleaned.modulA || {}),
@@ -687,13 +687,13 @@ export async function submitHouseholdCensus(params: {
           logId,
           id_rt: existingHousehold.id_rt,
           rtKey: existingHousehold.rtKey,
-          changedByEmail: emailLower,
-          changedByName: actorName,
+          changedByEmail: emailLower.slice(0, 200),
+          changedByName: actorName.slice(0, 150),
           changedByRole: actorRole,
           changedAt: serverTimestamp(),
-          fieldPath: d.fieldPath,
-          oldValue: d.oldValue,
-          newValue: d.newValue,
+          fieldPath: d.fieldPath.slice(0, 200),
+          oldValue: d.oldValue.slice(0, 1000),
+          newValue: d.newValue.slice(0, 1000),
           reason,
         });
       }
@@ -745,11 +745,12 @@ export async function verifyHouseholdSubmission(params: {
   const emailLower = actorEmail.toLowerCase();
   const nowIso = new Date().toISOString();
 
+  const cleanCatatan = catatan.trim().slice(0, 500);
   try {
     await updateDoc(doc(db, 'households', household.id_rt), {
       verifikasi_status: decision,
-      verifikasi_catatan: catatan.trim(),
-      verifikasi_oleh: emailLower,
+      verifikasi_catatan: cleanCatatan,
+      verifikasi_oleh: emailLower.slice(0, 200),
       verifikasi_waktu: nowIso,
       sheetSynced: false,
       updatedAt: serverTimestamp(),
@@ -760,14 +761,14 @@ export async function verifyHouseholdSubmission(params: {
       logId,
       id_rt: household.id_rt,
       rtKey: household.rtKey,
-      changedByEmail: emailLower,
-      changedByName: actorName,
+      changedByEmail: emailLower.slice(0, 200),
+      changedByName: actorName.slice(0, 150),
       changedByRole: actorRole,
       changedAt: serverTimestamp(),
       fieldPath: 'verifikasi_status',
       oldValue: household.verifikasi_status || 'belum',
       newValue: decision,
-      reason: catatan.trim() || (decision === 'terverifikasi' ? 'Lolos verifikasi' : 'Dikembalikan'),
+      reason: cleanCatatan || (decision === 'terverifikasi' ? 'Lolos verifikasi' : 'Dikembalikan'),
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `verify/${household.id_rt}`);

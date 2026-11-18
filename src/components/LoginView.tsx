@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ClipboardCheck, LogOut, ShieldAlert, WifiOff } from 'lucide-react';
+import { ClipboardCheck, ExternalLink, LogOut, ShieldAlert, WifiOff } from 'lucide-react';
 import { User } from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface LoginViewProps {
@@ -22,17 +23,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
 }) => {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [unauthorizedHost, setUnauthorizedHost] = useState<string | null>(null);
 
   const handleLogin = async () => {
     setErrorMsg(null);
+    setUnauthorizedHost(null);
     setLoading(true);
     try {
       await onSignIn();
     } catch (err: any) {
       const code = err?.code || '';
       if (code === 'auth/unauthorized-domain') {
+        setUnauthorizedHost(window.location.hostname);
         setErrorMsg(
-          `Domain "${window.location.hostname}" belum diizinkan di Firebase Authentication. Gunakan URL resmi AI Studio atau tambahkan domain ini di Firebase Console → Authentication → Settings → Authorized domains.`
+          `Domain "${window.location.hostname}" belum didaftarkan pada Authorized domains di Firebase Authentication.`
         );
       } else if (code === 'auth/popup-blocked') {
         setErrorMsg('Jendela masuk Google diblokir oleh browser. Izinkan pop-up lalu coba lagi.');
@@ -148,9 +152,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </button>
 
             {errorMsg && (
-              <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-                {errorMsg}
-              </p>
+              <div className="space-y-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-900">
+                <p>{errorMsg}</p>
+                {unauthorizedHost && firebaseConfig.projectId && (
+                  <a
+                    href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 font-bold text-emerald-900 underline hover:text-emerald-700"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Buka Pengaturan Authorized Domains di Firebase Console
+                  </a>
+                )}
+              </div>
             )}
 
             <div className="border-t border-slate-200 pt-4 text-xs leading-relaxed text-slate-500">
