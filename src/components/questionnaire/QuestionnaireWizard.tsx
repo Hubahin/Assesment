@@ -292,7 +292,14 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
       onSubmittedMessage(`${household.id_rt} berhasil dikirim. ${sheetMsg}`);
       onClose();
     } catch (err: any) {
-      setSubmitError(err?.message || 'Gagal menyimpan data sensus.');
+      const rawMsg = err?.message || 'Gagal menyimpan data sensus.';
+      if (rawMsg.includes('Missing or insufficient permissions')) {
+        setSubmitError(
+          `Izin Firestore ditolak saat menyimpan (${household.rtKey}). Pastikan akun ${actorEmail} berstatus Aktif dan RT ${household.rtKey} sudah ditugaskan oleh Admin di menu Petugas, lalu muat ulang aplikasi. Detail: ${rawMsg}`
+        );
+      } else {
+        setSubmitError(rawMsg);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -368,7 +375,7 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
           <div className="flex items-start gap-2.5">
             <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-rose-700" />
             <div>
-              <p className="text-sm font-bold">Dikembalikan oleh Koordinator Enumerator</p>
+              <p className="text-sm font-bold">Dikembalikan oleh Admin untuk Perbaikan</p>
               <p className="mt-1 text-sm">{household.verifikasi_catatan || 'Harap periksa kembali isian.'}</p>
             </div>
           </div>

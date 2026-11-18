@@ -333,13 +333,12 @@ service cloud.firestore {
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt && (
           isAdmin() ||
-          (isKoordinator() && isAssignedToRt(existing().rtKey)) ||
           (
-            isEnumerator() &&
+            (isEnumerator() || isKoordinator()) &&
             isAssignedToRt(existing().rtKey) &&
             (
               incoming().verifikasi_status == existing().verifikasi_status ||
-              (existing().verifikasi_status == 'dikembalikan' && incoming().verifikasi_status == 'belum')
+              incoming().verifikasi_status == 'belum'
             ) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',

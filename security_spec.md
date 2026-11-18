@@ -3,9 +3,9 @@
 ## 1. Invarian Data
 1. **Akses Terbatas Petugas Terdaftar**: Pengguna yang emailnya tidak terdaftar aktif di `staff_members` (selain admin bootstrap `arisriswanto057@gmail.com`) tidak dapat membaca atau menulis koleksi mana pun.
 2. **Isolasi Wilayah (RBAC + RT Scoping)**:
-   - `admin`: akses penuh ke konfigurasi wilayah, manajemen petugas (admin, koordinator, enumerator), seluruh rumah tangga, PII, kunjungan, dan log revisi.
-   - `koordinator`: hanya dapat membaca dan memverifikasi data pada `assignedRTs` miliknya, serta mendaftarkan/mengubah petugas dengan `role == 'enumerator'`. Tidak dapat mempromosikan diri atau orang lain menjadi `admin` atau `koordinator`.
-   - `enumerator`: hanya dapat membaca, menambah, dan memperbarui rumah tangga/kunjungan pada `assignedRTs` miliknya. Tidak dapat menandai isian sebagai `terverifikasi`.
+   - `admin`: akses penuh ke konfigurasi wilayah, manajemen petugas (admin, koordinator, enumerator), verifikasi hasil sensus (`terverifikasi` / `dikembalikan`), seluruh rumah tangga, PII, kunjungan, dan log revisi.
+   - `koordinator`: dapat membaca, menambah, dan mengirim/memperbarui data sensus pada `assignedRTs` miliknya (tanpa mengubah status menjadi `terverifikasi`), serta mendaftarkan/mengubah petugas dengan `role == 'enumerator'`. Tidak dapat mempromosikan diri atau orang lain menjadi `admin` atau `koordinator`.
+   - `enumerator`: dapat membaca, menambah, dan mengirim/memperbarui data sensus beserta foto, PII, dan log kunjungan pada `assignedRTs` miliknya. Tidak dapat menandai isian sebagai `terverifikasi` (verifikasi dilakukan oleh `admin`).
 3. **Imutabilitas ID dan Riwayat**:
    - Dokumen `households` tidak pernah dapat dihapus (`allow delete: if false`).
    - Field identitas (`id_rt`, `dusun`, `rw`, `rt`, `rtKey`, `urutan`, `createdAt`, `createdBy`) tidak dapat diubah setelah dibuat.

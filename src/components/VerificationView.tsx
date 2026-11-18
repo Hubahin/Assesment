@@ -85,7 +85,7 @@ export const VerificationView: React.FC<VerificationViewProps> = ({
           <div>
             <h2 className="text-lg font-extrabold text-slate-950">Verifikasi Isian Enumerator</h2>
             <p className="text-xs text-slate-600">
-              Tinjau isian yang sudah dikirim di RT pengawasan Anda, lalu tandai Terverifikasi atau
+              Tinjau isian yang sudah dikirim enumerator oleh Admin, lalu tandai Terverifikasi atau
               Kembalikan dengan catatan.
             </p>
           </div>

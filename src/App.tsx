@@ -59,7 +59,7 @@ interface NavTabItem {
 
 const NAV_TABS: NavTabItem[] = [
   { id: 'pendataan', label: 'Pendataan', icon: ClipboardList, roles: ['admin', 'koordinator', 'enumerator'] },
-  { id: 'verifikasi', label: 'Verifikasi', icon: FileCheck2, roles: ['admin', 'koordinator'] },
+  { id: 'verifikasi', label: 'Verifikasi', icon: FileCheck2, roles: ['admin'] },
   { id: 'cakupan', label: 'Cakupan', icon: BarChart3, roles: ['admin', 'koordinator'] },
   { id: 'peta', label: 'Peta', icon: MapIcon, roles: ['admin', 'koordinator', 'enumerator'] },
   { id: 'petugas', label: 'Petugas', icon: Users, roles: ['admin', 'koordinator'] },
@@ -335,8 +335,7 @@ export default function App() {
               />
             )}
 
-            {effectiveTab === 'verifikasi' &&
-              (profile.role === 'admin' || profile.role === 'koordinator') && (
+            {effectiveTab === 'verifikasi' && profile.role === 'admin' && (
                 <VerificationView
                   profile={profile}
                   households={households}
