@@ -219,7 +219,7 @@ service cloud.firestore {
         data.id_rt == idParam &&
         isValidHouseholdId(data.id_rt) &&
         isValidRtKey(data.rtKey) &&
-        data.dataUrl is string && data.dataUrl.size() <= 450000 &&
+        data.dataUrl is string && data.dataUrl.size() <= 850000 &&
         data.updatedBy is string && data.updatedBy.size() <= 200 &&
         data.updatedAt == request.time;
     }

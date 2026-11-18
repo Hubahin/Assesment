@@ -310,7 +310,7 @@
         },
         "dataUrl": {
           "type": "string",
-          "maxLength": 450000
+          "maxLength": 850000
         },
         "updatedBy": {
           "type": "string",

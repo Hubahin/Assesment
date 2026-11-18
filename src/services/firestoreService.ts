@@ -483,14 +483,14 @@ export async function importHouseholdsCsvBatch(
             rt: item.rt,
             rtKey,
             urutan: current,
-            no_bangunan: item.no_bangunan.trim(),
-            nama_kk_daftar: item.nama_kk.trim(),
-            alamat: item.alamat.trim(),
+            no_bangunan: item.no_bangunan.trim().slice(0, 30),
+            nama_kk_daftar: item.nama_kk.trim().slice(0, 150),
+            alamat: item.alamat.trim().slice(0, 300),
             sumber: item.sumber,
             status_daftar: 'aktif',
             status_cacah: 'belum_dikunjungi',
             verifikasi_status: 'belum',
-            createdBy: actorEmail.toLowerCase(),
+            createdBy: actorEmail.toLowerCase().slice(0, 200),
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -608,9 +608,9 @@ export async function submitHouseholdCensus(params: {
       status_cacah: nextStatusCacah,
       verifikasi_status: nextVerifikasiStatus,
       modul0: cleaned.modul0,
-      enumerator_email: emailLower,
-      enumerator_name: actorName,
-      submittedAt: existingHousehold.submittedAt || nowIso,
+      enumerator_email: emailLower.slice(0, 200),
+      enumerator_name: actorName.slice(0, 150),
+      submittedAt: (existingHousehold.submittedAt || nowIso).slice(0, 60),
       sheetSynced: false,
       updatedAt: serverTimestamp(),
     };
@@ -618,26 +618,38 @@ export async function submitHouseholdCensus(params: {
     if (cleaned.modulB) updatePayload.modulB = cleaned.modulB;
     if (cleaned.modulC) updatePayload.modulC = cleaned.modulC;
 
-    await updateDoc(doc(db, 'households', existingHousehold.id_rt), stripUndefined(updatePayload));
+    try {
+      await updateDoc(doc(db, 'households', existingHousehold.id_rt), stripUndefined(updatePayload));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `households/${existingHousehold.id_rt}`);
+    }
 
     // 2. Write separated PII document (NIK & No KK)
-    await setDoc(doc(db, 'household_pii', existingHousehold.id_rt), stripUndefined({
-      id_rt: existingHousehold.id_rt,
-      rtKey: existingHousehold.rtKey,
-      membersPii: cleaned.membersPii,
-      updatedBy: emailLower.slice(0, 200),
-      updatedAt: serverTimestamp(),
-    }));
+    try {
+      await setDoc(doc(db, 'household_pii', existingHousehold.id_rt), stripUndefined({
+        id_rt: existingHousehold.id_rt,
+        rtKey: existingHousehold.rtKey,
+        membersPii: cleaned.membersPii,
+        updatedBy: emailLower.slice(0, 200),
+        updatedAt: serverTimestamp(),
+      }));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `household_pii/${existingHousehold.id_rt}`);
+    }
 
     // 3. Write compressed photo if present
     if (draft.fotoDataUrl) {
-      await setDoc(doc(db, 'household_photos', existingHousehold.id_rt), {
-        id_rt: existingHousehold.id_rt,
-        rtKey: existingHousehold.rtKey,
-        dataUrl: draft.fotoDataUrl,
-        updatedBy: emailLower,
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        await setDoc(doc(db, 'household_photos', existingHousehold.id_rt), {
+          id_rt: existingHousehold.id_rt,
+          rtKey: existingHousehold.rtKey,
+          dataUrl: draft.fotoDataUrl,
+          updatedBy: emailLower.slice(0, 200),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `household_photos/${existingHousehold.id_rt}`);
+      }
     }
 
     // 4. Always record visit log (including failed visits)
@@ -649,8 +661,8 @@ export async function submitHouseholdCensus(params: {
       dusun: existingHousehold.dusun,
       rw: existingHousehold.rw,
       rt: existingHousehold.rt,
-      enumerator_email: emailLower,
-      enumerator_name: actorName,
+      enumerator_email: emailLower.slice(0, 200),
+      enumerator_name: actorName.slice(0, 150),
       waktu: nowIso,
       status_kunjungan: cleaned.modul0.status_kunjungan || 'ditemui',
       ...(cleaned.modul0.kunjungan_ke !== undefined ? { kunjungan_ke: cleaned.modul0.kunjungan_ke } : {}),
@@ -663,12 +675,18 @@ export async function submitHouseholdCensus(params: {
         metode: 'manual',
         alasan_manual: 'Tidak tersedia',
       },
-      ...(cleaned.modulC?.catatan_enumerator ? { catatan: cleaned.modulC.catatan_enumerator } : {}),
+      ...(cleaned.modulC?.catatan_enumerator
+        ? { catatan: cleaned.modulC.catatan_enumerator.slice(0, 500) }
+        : {}),
     };
-    await setDoc(doc(db, 'visits', visitId), {
-      ...visitData,
-      createdAt: serverTimestamp(),
-    });
+    try {
+      await setDoc(doc(db, 'visits', visitId), stripUndefined({
+        ...visitData,
+        createdAt: serverTimestamp(),
+      }));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `visits/${visitId}`);
+    }
 
     // 5. Log post-submit revisions if previously submitted
     if (isPostSubmitRevision) {
@@ -683,19 +701,23 @@ export async function submitHouseholdCensus(params: {
       for (let i = 0; i < limitedDiffs.length; i++) {
         const d = limitedDiffs[i];
         const logId = `rev_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
-        await setDoc(doc(db, 'revision_logs', logId), {
-          logId,
-          id_rt: existingHousehold.id_rt,
-          rtKey: existingHousehold.rtKey,
-          changedByEmail: emailLower.slice(0, 200),
-          changedByName: actorName.slice(0, 150),
-          changedByRole: actorRole,
-          changedAt: serverTimestamp(),
-          fieldPath: d.fieldPath.slice(0, 200),
-          oldValue: d.oldValue.slice(0, 1000),
-          newValue: d.newValue.slice(0, 1000),
-          reason,
-        });
+        try {
+          await setDoc(doc(db, 'revision_logs', logId), {
+            logId,
+            id_rt: existingHousehold.id_rt,
+            rtKey: existingHousehold.rtKey,
+            changedByEmail: emailLower.slice(0, 200),
+            changedByName: actorName.slice(0, 150),
+            changedByRole: actorRole,
+            changedAt: serverTimestamp(),
+            fieldPath: d.fieldPath.slice(0, 200),
+            oldValue: d.oldValue.slice(0, 1000),
+            newValue: d.newValue.slice(0, 1000),
+            reason,
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.CREATE, `revision_logs/${logId}`);
+        }
       }
     }
 
@@ -717,6 +739,9 @@ export async function submitHouseholdCensus(params: {
 
     return { updatedHousehold, visit: visitData, cleanedPii: cleaned.membersPii };
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('{')) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.WRITE, `submit/${existingHousehold.id_rt}`);
   }
 }

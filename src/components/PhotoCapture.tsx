@@ -38,7 +38,13 @@ export const PhotoCapture: React.FC<PhotoCaptureProps> = ({ value, onChange }) =
           const ctx = canvas.getContext('2d');
           if (!ctx) throw new Error('Canvas tidak tersedia');
           ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL('image/jpeg', 0.72);
+          let compressed = canvas.toDataURL('image/jpeg', 0.72);
+          if (compressed.length > 420000) {
+            compressed = canvas.toDataURL('image/jpeg', 0.55);
+          }
+          if (compressed.length > 420000) {
+            compressed = canvas.toDataURL('image/jpeg', 0.4);
+          }
           onChange(compressed);
         } catch {
           setDisabledReason('Penyimpanan/kompresi foto tidak tersedia pada perangkat ini. Kuesioner tetap dapat dilanjutkan.');
