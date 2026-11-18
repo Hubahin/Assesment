@@ -182,21 +182,21 @@ service cloud.firestore {
         data.alamat is string && data.alamat.size() <= 300 &&
         data.sumber in ['listing_lapangan', 'daftar_kk_rt', 'data_desa', 'temuan_lapangan'] &&
         data.status_daftar in ['aktif', 'pindah', 'ganda', 'tidak_ada'] &&
-        (!('catatan_daftar' in data) || (data.catatan_daftar is string && data.catatan_daftar.size() <= 500)) &&
+        (!('catatan_daftar' in data) || (data.catatan_daftar is string && data.catatan_daftar.size() <= 1000)) &&
         data.status_cacah in ['belum_dikunjungi', 'draf', 'tercacah', 'menolak', 'tidak_ditemui', 'rumah_kosong'] &&
         data.verifikasi_status in ['belum', 'terverifikasi', 'dikembalikan'] &&
-        (!('verifikasi_catatan' in data) || (data.verifikasi_catatan is string && data.verifikasi_catatan.size() <= 500)) &&
+        (!('verifikasi_catatan' in data) || (data.verifikasi_catatan is string && data.verifikasi_catatan.size() <= 1000)) &&
         (!('verifikasi_oleh' in data) || (data.verifikasi_oleh is string && data.verifikasi_oleh.size() <= 200)) &&
-        (!('verifikasi_waktu' in data) || (data.verifikasi_waktu is string && data.verifikasi_waktu.size() <= 60)) &&
+        (!('verifikasi_waktu' in data) || (data.verifikasi_waktu is string && data.verifikasi_waktu.size() <= 100)) &&
         (!('modul0' in data) || data.modul0 is map) &&
         (!('modulA' in data) || data.modulA is map) &&
         (!('modulB' in data) || (data.modulB is list && data.modulB.size() <= 30)) &&
         (!('modulC' in data) || data.modulC is map) &&
         (!('enumerator_email' in data) || (data.enumerator_email is string && data.enumerator_email.size() <= 200)) &&
-        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 150)) &&
-        (!('submittedAt' in data) || (data.submittedAt is string && data.submittedAt.size() <= 60)) &&
+        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 200)) &&
+        (!('submittedAt' in data) || (data.submittedAt is string && data.submittedAt.size() <= 100)) &&
         (!('sheetSynced' in data) || data.sheetSynced is bool) &&
-        (!('sheetSyncedAt' in data) || (data.sheetSyncedAt is string && data.sheetSyncedAt.size() <= 60)) &&
+        (!('sheetSyncedAt' in data) || (data.sheetSyncedAt is string && data.sheetSyncedAt.size() <= 100)) &&
         data.createdBy is string && data.createdBy.size() <= 200 &&
         data.updatedAt == request.time;
     }
@@ -219,7 +219,7 @@ service cloud.firestore {
         data.id_rt == idParam &&
         isValidHouseholdId(data.id_rt) &&
         isValidRtKey(data.rtKey) &&
-        data.dataUrl is string && data.dataUrl.size() <= 850000 &&
+        data.dataUrl is string && data.dataUrl.size() <= 1020000 &&
         data.updatedBy is string && data.updatedBy.size() <= 200 &&
         data.updatedAt == request.time;
     }
@@ -235,13 +235,13 @@ service cloud.firestore {
         data.rw is string && data.rw.size() == 2 &&
         data.rt is string && data.rt.size() == 2 &&
         data.enumerator_email is string && data.enumerator_email.size() <= 200 &&
-        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 150)) &&
-        data.waktu is string && data.waktu.size() <= 60 &&
+        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 200)) &&
+        data.waktu is string && data.waktu.size() <= 100 &&
         data.status_kunjungan in ['ditemui', 'tidak_ditemui', 'rumah_kosong'] &&
         (!('kunjungan_ke' in data) || (data.kunjungan_ke is int && data.kunjungan_ke >= 1 && data.kunjungan_ke <= 3)) &&
         (!('persetujuan' in data) || data.persetujuan in ['ya', 'tidak']) &&
         data.lokasi is map &&
-        (!('catatan' in data) || (data.catatan is string && data.catatan.size() <= 500)) &&
+        (!('catatan' in data) || (data.catatan is string && data.catatan.size() <= 2000)) &&
         data.createdAt == request.time;
     }
 
@@ -253,13 +253,13 @@ service cloud.firestore {
         isValidHouseholdId(data.id_rt) &&
         isValidRtKey(data.rtKey) &&
         data.changedByEmail is string && data.changedByEmail.lower() == myEmail() &&
-        data.changedByName is string && data.changedByName.size() <= 150 &&
+        data.changedByName is string && data.changedByName.size() <= 200 &&
         data.changedByRole in ['admin', 'koordinator', 'enumerator'] &&
         data.changedAt == request.time &&
-        data.fieldPath is string && data.fieldPath.size() >= 1 && data.fieldPath.size() <= 200 &&
-        data.oldValue is string && data.oldValue.size() <= 1000 &&
-        data.newValue is string && data.newValue.size() <= 1000 &&
-        data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500;
+        data.fieldPath is string && data.fieldPath.size() >= 1 && data.fieldPath.size() <= 300 &&
+        data.oldValue is string && data.oldValue.size() <= 2000 &&
+        data.newValue is string && data.newValue.size() <= 2000 &&
+        data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 1000;
     }
 
     // --- Collection Rules ---

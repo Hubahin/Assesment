@@ -178,7 +178,7 @@
         },
         "catatan_daftar": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 1000
         },
         "status_cacah": {
           "type": "string",
@@ -190,7 +190,7 @@
         },
         "verifikasi_catatan": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 1000
         },
         "verifikasi_oleh": {
           "type": "string",
@@ -198,7 +198,7 @@
         },
         "verifikasi_waktu": {
           "type": "string",
-          "maxLength": 60
+          "maxLength": 100
         },
         "modul0": {
           "type": "object"
@@ -218,18 +218,18 @@
         },
         "enumerator_name": {
           "type": "string",
-          "maxLength": 150
+          "maxLength": 200
         },
         "submittedAt": {
           "type": "string",
-          "maxLength": 60
+          "maxLength": 100
         },
         "sheetSynced": {
           "type": "boolean"
         },
         "sheetSyncedAt": {
           "type": "string",
-          "maxLength": 60
+          "maxLength": 100
         },
         "createdBy": {
           "type": "string",
@@ -310,7 +310,7 @@
         },
         "dataUrl": {
           "type": "string",
-          "maxLength": 850000
+          "maxLength": 1020000
         },
         "updatedBy": {
           "type": "string",
@@ -360,11 +360,11 @@
         },
         "enumerator_name": {
           "type": "string",
-          "maxLength": 150
+          "maxLength": 200
         },
         "waktu": {
           "type": "string",
-          "maxLength": 60
+          "maxLength": 100
         },
         "status_kunjungan": {
           "type": "string",
@@ -382,7 +382,7 @@
         },
         "catatan": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 2000
         },
         "createdAt": {
           "type": "string",
@@ -416,7 +416,7 @@
         },
         "changedByName": {
           "type": "string",
-          "maxLength": 150
+          "maxLength": 200
         },
         "changedByRole": {
           "type": "string",
@@ -428,19 +428,19 @@
         },
         "fieldPath": {
           "type": "string",
-          "maxLength": 200
+          "maxLength": 300
         },
         "oldValue": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 2000
         },
         "newValue": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 2000
         },
         "reason": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 1000
         }
       },
       "required": ["logId", "id_rt", "rtKey", "changedByEmail", "changedByName", "changedByRole", "changedAt", "fieldPath", "oldValue", "newValue", "reason"]

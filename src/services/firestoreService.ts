@@ -563,6 +563,55 @@ export async function saveHouseholdDraftRemote(
   }
 }
 
+async function ensurePhotoUnderLimit(dataUrl: string, maxChars = 420000): Promise<string> {
+  if (!dataUrl || dataUrl.length <= maxChars || typeof document === 'undefined') {
+    return dataUrl;
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let smallest = dataUrl;
+        const trySizes = [1024, 800, 640, 480];
+        const tryQualities = [0.6, 0.45, 0.35];
+        for (const maxSide of trySizes) {
+          let { width, height } = img;
+          if (width > maxSide || height > maxSide) {
+            if (width >= height) {
+              height = Math.round((height / width) * maxSide);
+              width = maxSide;
+            } else {
+              width = Math.round((width / height) * maxSide);
+              height = maxSide;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) break;
+          ctx.drawImage(img, 0, 0, width, height);
+          for (const q of tryQualities) {
+            const out = canvas.toDataURL('image/jpeg', q);
+            if (out.length < smallest.length) {
+              smallest = out;
+            }
+            if (out.length <= maxChars) {
+              resolve(out);
+              return;
+            }
+          }
+        }
+        resolve(smallest);
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 export async function submitHouseholdCensus(params: {
   existingHousehold: HouseholdRecord;
   draft: CensusDraft;
@@ -609,8 +658,8 @@ export async function submitHouseholdCensus(params: {
       verifikasi_status: nextVerifikasiStatus,
       modul0: cleaned.modul0,
       enumerator_email: emailLower.slice(0, 200),
-      enumerator_name: actorName.slice(0, 150),
-      submittedAt: (existingHousehold.submittedAt || nowIso).slice(0, 60),
+      enumerator_name: actorName.slice(0, 200),
+      submittedAt: (existingHousehold.submittedAt || nowIso).slice(0, 100),
       sheetSynced: false,
       updatedAt: serverTimestamp(),
     };
@@ -639,11 +688,12 @@ export async function submitHouseholdCensus(params: {
 
     // 3. Write compressed photo if present
     if (draft.fotoDataUrl) {
+      const safePhotoUrl = await ensurePhotoUnderLimit(draft.fotoDataUrl, 420000);
       try {
         await setDoc(doc(db, 'household_photos', existingHousehold.id_rt), {
           id_rt: existingHousehold.id_rt,
           rtKey: existingHousehold.rtKey,
-          dataUrl: draft.fotoDataUrl,
+          dataUrl: safePhotoUrl,
           updatedBy: emailLower.slice(0, 200),
           updatedAt: serverTimestamp(),
         });
@@ -690,7 +740,7 @@ export async function submitHouseholdCensus(params: {
 
     // 5. Log post-submit revisions if previously submitted
     if (isPostSubmitRevision) {
-      const reason = (revisionReason || 'Perbaikan isian setelah dikirim').trim().slice(0, 500);
+      const reason = (revisionReason?.trim() || 'Perbaikan isian setelah dikirim').slice(0, 950);
       const diffs = [
         ...computeJsonDiffs('modul0', existingHousehold.modul0 || {}, cleaned.modul0),
         ...computeJsonDiffs('modulA', existingHousehold.modulA || {}, cleaned.modulA || {}),
