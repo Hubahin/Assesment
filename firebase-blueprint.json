@@ -1,0 +1,487 @@
+{
+  "entities": {
+    "WilayahConfig": {
+      "title": "WilayahConfig",
+      "description": "Pemetaan RW 01-19 ke dusun D1-D5 dan jumlah RT per RW di Desa Cibiru Wetan",
+      "type": "object",
+      "properties": {
+        "rwMappings": {
+          "type": "array",
+          "description": "Daftar 19 pemetaan RW ke dusun dan jumlah RT"
+        },
+        "totalRt": {
+          "type": "integer",
+          "description": "Total RT hasil pemetaan (target 85)"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["rwMappings", "totalRt", "updatedBy", "updatedAt"]
+    },
+    "SpreadsheetConfig": {
+      "title": "SpreadsheetConfig",
+      "description": "Konfigurasi Google Spreadsheet (Apps Script Webhook tanpa project Google Cloud)",
+      "type": "object",
+      "properties": {
+        "spreadsheetId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "spreadsheetUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "webhookUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["spreadsheetId", "spreadsheetUrl", "title", "updatedBy", "updatedAt"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Petugas sensus (Admin, Koordinator Enumerator, Enumerator) terdaftar berdasarkan email",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 200
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "koordinator", "enumerator"]
+        },
+        "assignedRTs": {
+          "type": "array",
+          "description": "Daftar kode RT yang ditugaskan (format D2-07-03)"
+        },
+        "koordinatorEmail": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["email", "name", "role", "assignedRTs", "active", "createdBy", "createdAt", "updatedAt"]
+    },
+    "RtCounter": {
+      "title": "RtCounter",
+      "description": "Penghitung nomor urut 3 digit per RT untuk transaksi atomik pembuatan ID rumah tangga",
+      "type": "object",
+      "properties": {
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "lastNumber": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["rtKey", "lastNumber", "updatedAt"]
+    },
+    "Household": {
+      "title": "Household",
+      "description": "Data daftar induk rumah tangga dan hasil sensus analisis (tanpa NIK dan Nomor KK)",
+      "type": "object",
+      "properties": {
+        "id_rt": {
+          "type": "string",
+          "pattern": "^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$",
+          "maxLength": 30
+        },
+        "dusun": {
+          "type": "string",
+          "enum": ["D1", "D2", "D3", "D4", "D5"]
+        },
+        "rw": {
+          "type": "string",
+          "pattern": "^[0-9]{2}$",
+          "maxLength": 4
+        },
+        "rt": {
+          "type": "string",
+          "pattern": "^[0-9]{2}$",
+          "maxLength": 4
+        },
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "urutan": {
+          "type": "integer"
+        },
+        "no_bangunan": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "nama_kk_daftar": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "alamat": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "sumber": {
+          "type": "string",
+          "enum": ["listing_lapangan", "daftar_kk_rt", "data_desa", "temuan_lapangan"]
+        },
+        "status_daftar": {
+          "type": "string",
+          "enum": ["aktif", "pindah", "ganda", "tidak_ada"]
+        },
+        "catatan_daftar": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "status_cacah": {
+          "type": "string",
+          "enum": ["belum_dikunjungi", "draf", "tercacah", "menolak", "tidak_ditemui", "rumah_kosong"]
+        },
+        "verifikasi_status": {
+          "type": "string",
+          "enum": ["belum", "terverifikasi", "dikembalikan"]
+        },
+        "verifikasi_catatan": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "verifikasi_oleh": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "verifikasi_waktu": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "modul0": {
+          "type": "object"
+        },
+        "modulA": {
+          "type": "object"
+        },
+        "modulB": {
+          "type": "array"
+        },
+        "modulC": {
+          "type": "object"
+        },
+        "enumerator_email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "enumerator_name": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "submittedAt": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "sheetSynced": {
+          "type": "boolean"
+        },
+        "sheetSyncedAt": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id_rt",
+        "dusun",
+        "rw",
+        "rt",
+        "rtKey",
+        "urutan",
+        "no_bangunan",
+        "nama_kk_daftar",
+        "alamat",
+        "sumber",
+        "status_daftar",
+        "status_cacah",
+        "verifikasi_status",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "HouseholdPii": {
+      "title": "HouseholdPii",
+      "description": "Data identitas sensitif terpisah (NIK, Nomor KK, nama anggota untuk identitas.csv)",
+      "type": "object",
+      "properties": {
+        "id_rt": {
+          "type": "string",
+          "pattern": "^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$",
+          "maxLength": 30
+        },
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "membersPii": {
+          "type": "array",
+          "description": "Daftar identitas per anggota (no_urut, nama, nik, no_kk)"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id_rt", "rtKey", "membersPii", "updatedBy", "updatedAt"]
+    },
+    "HouseholdPhoto": {
+      "title": "HouseholdPhoto",
+      "description": "Foto bagian depan rumah terkompresi (maks sisi terpanjang 1024px) terpisah dari dokumen analisis",
+      "type": "object",
+      "properties": {
+        "id_rt": {
+          "type": "string",
+          "pattern": "^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$",
+          "maxLength": 30
+        },
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "dataUrl": {
+          "type": "string",
+          "maxLength": 450000
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id_rt", "rtKey", "dataUrl", "updatedBy", "updatedAt"]
+    },
+    "VisitLog": {
+      "title": "VisitLog",
+      "description": "Catatan setiap kunjungan lapangan (termasuk kunjungan gagal) dengan waktu, enumerator, dan koordinat",
+      "type": "object",
+      "properties": {
+        "visitId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "id_rt": {
+          "type": "string",
+          "pattern": "^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$",
+          "maxLength": 30
+        },
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "dusun": {
+          "type": "string",
+          "enum": ["D1", "D2", "D3", "D4", "D5"]
+        },
+        "rw": {
+          "type": "string",
+          "maxLength": 4
+        },
+        "rt": {
+          "type": "string",
+          "maxLength": 4
+        },
+        "enumerator_email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "enumerator_name": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "waktu": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "status_kunjungan": {
+          "type": "string",
+          "enum": ["ditemui", "tidak_ditemui", "rumah_kosong"]
+        },
+        "kunjungan_ke": {
+          "type": "integer"
+        },
+        "persetujuan": {
+          "type": "string",
+          "enum": ["ya", "tidak"]
+        },
+        "lokasi": {
+          "type": "object"
+        },
+        "catatan": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["visitId", "id_rt", "rtKey", "dusun", "rw", "rt", "enumerator_email", "waktu", "status_kunjungan", "lokasi", "createdAt"]
+    },
+    "RevisionLog": {
+      "title": "RevisionLog",
+      "description": "Jejak audit perubahan data sensus setelah kirim (siapa, kapan, field, nilai lama, nilai baru, alasan)",
+      "type": "object",
+      "properties": {
+        "logId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "id_rt": {
+          "type": "string",
+          "pattern": "^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$",
+          "maxLength": 30
+        },
+        "rtKey": {
+          "type": "string",
+          "pattern": "^D[1-5]-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 20
+        },
+        "changedByEmail": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "changedByName": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "changedByRole": {
+          "type": "string",
+          "enum": ["admin", "koordinator", "enumerator"]
+        },
+        "changedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fieldPath": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "oldValue": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "newValue": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": ["logId", "id_rt", "rtKey", "changedByEmail", "changedByName", "changedByRole", "changedAt", "fieldPath", "oldValue", "newValue", "reason"]
+    }
+  },
+  "firestore": {
+    "/config/wilayah": {
+      "schema": { "$ref": "#/entities/WilayahConfig" },
+      "description": "Pemetaan RW ke dusun dan jumlah RT"
+    },
+    "/config/spreadsheet": {
+      "schema": { "$ref": "#/entities/SpreadsheetConfig" },
+      "description": "Konfigurasi Google Spreadsheet"
+    },
+    "/staff_members/{email}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Daftar petugas berdasarkan email dengan role dan penugasan RT"
+    },
+    "/rt_counters/{rtKey}": {
+      "schema": { "$ref": "#/entities/RtCounter" },
+      "description": "Counter atomik nomor urut 3 digit per RT"
+    },
+    "/households/{id_rt}": {
+      "schema": { "$ref": "#/entities/Household" },
+      "description": "Daftar induk dan data sensus analisis rumah tangga"
+    },
+    "/household_pii/{id_rt}": {
+      "schema": { "$ref": "#/entities/HouseholdPii" },
+      "description": "Data identitas sensitif (NIK, No KK) terpisah dari data analisis"
+    },
+    "/household_photos/{id_rt}": {
+      "schema": { "$ref": "#/entities/HouseholdPhoto" },
+      "description": "Foto depan rumah terkompresi"
+    },
+    "/visits/{visitId}": {
+      "schema": { "$ref": "#/entities/VisitLog" },
+      "description": "Riwayat seluruh kunjungan termasuk kunjungan gagal"
+    },
+    "/revision_logs/{logId}": {
+      "schema": { "$ref": "#/entities/RevisionLog" },
+      "description": "Log revisi pasca-kirim yang tidak dapat dihapus"
+    }
+  }
+}

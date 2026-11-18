@@ -1,0 +1,418 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        request.auth.token.email_verified == true;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailKey(email) {
+      return email is string && email.size() >= 5 && email.size() <= 200 && email.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function isValidRtKey(rtKey) {
+      return rtKey is string && rtKey.size() >= 7 && rtKey.size() <= 12 && rtKey.matches('^D[1-5]-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isValidHouseholdId(id) {
+      return id is string && id.size() == 17 && id.matches('^CBW-D[1-5]-[0-9]{2}-[0-9]{2}-[0-9]{3}$');
+    }
+
+    function staffPath(email) {
+      return /databases/$(database)/documents/staff_members/$(email);
+    }
+
+    function hasStaffDoc() {
+      return isVerifiedEmail() && exists(staffPath(myEmail()));
+    }
+
+    function staffData() {
+      return get(staffPath(myEmail())).data;
+    }
+
+    function isActiveStaff() {
+      return isVerifiedEmail() && (
+        myEmail() == 'arisriswanto057@gmail.com' ||
+        (hasStaffDoc() && staffData().active == true)
+      );
+    }
+
+    function isAdmin() {
+      return isVerifiedEmail() && (
+        myEmail() == 'arisriswanto057@gmail.com' ||
+        (hasStaffDoc() && staffData().active == true && staffData().role == 'admin')
+      );
+    }
+
+    function isKoordinator() {
+      return isVerifiedEmail() && hasStaffDoc() && staffData().active == true && staffData().role == 'koordinator';
+    }
+
+    function isEnumerator() {
+      return isVerifiedEmail() && hasStaffDoc() && staffData().active == true && staffData().role == 'enumerator';
+    }
+
+    function isAssignedToRt(rtKey) {
+      return isAdmin() || (
+        isActiveStaff() &&
+        hasStaffDoc() &&
+        staffData().assignedRTs is list &&
+        rtKey in staffData().assignedRTs
+      );
+    }
+
+    // --- Validation Blueprints ---
+    function isValidWilayahConfig(data) {
+      return data.keys().hasAll(['rwMappings', 'totalRt', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['rwMappings', 'totalRt', 'updatedBy', 'updatedAt']) &&
+        data.rwMappings is list &&
+        data.rwMappings.size() == 19 &&
+        data.totalRt is int &&
+        data.totalRt >= 0 &&
+        data.totalRt <= 500 &&
+        data.updatedBy is string &&
+        data.updatedBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidSpreadsheetConfig(data) {
+      return data.keys().hasAll(['spreadsheetId', 'spreadsheetUrl', 'title', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['spreadsheetId', 'spreadsheetUrl', 'webhookUrl', 'title', 'lastSyncedAt', 'updatedBy', 'updatedAt']) &&
+        data.spreadsheetId is string &&
+        data.spreadsheetId.size() >= 1 &&
+        data.spreadsheetId.size() <= 200 &&
+        data.spreadsheetUrl is string &&
+        data.spreadsheetUrl.size() <= 500 &&
+        (!('webhookUrl' in data) || (data.webhookUrl is string && data.webhookUrl.size() <= 500)) &&
+        data.title is string &&
+        data.title.size() >= 1 &&
+        data.title.size() <= 200 &&
+        (!('lastSyncedAt' in data) || (data.lastSyncedAt is string && data.lastSyncedAt.size() <= 60)) &&
+        data.updatedBy is string &&
+        data.updatedBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidStaffMember(data, emailDocId) {
+      return data.keys().hasAll(['email', 'name', 'role', 'assignedRTs', 'active', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['email', 'name', 'role', 'assignedRTs', 'koordinatorEmail', 'active', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.email is string &&
+        data.email.lower() == emailDocId &&
+        isValidEmailKey(data.email) &&
+        data.name is string &&
+        data.name.size() >= 1 &&
+        data.name.size() <= 150 &&
+        data.role in ['admin', 'koordinator', 'enumerator'] &&
+        data.assignedRTs is list &&
+        data.assignedRTs.size() <= 120 &&
+        (data.assignedRTs.size() == 0 || isValidRtKey(data.assignedRTs[0])) &&
+        (!('koordinatorEmail' in data) || (data.koordinatorEmail is string && data.koordinatorEmail.size() <= 200)) &&
+        data.active is bool &&
+        data.createdBy is string &&
+        data.createdBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidRtCounter(data, rtKeyParam) {
+      return data.keys().hasAll(['rtKey', 'lastNumber', 'updatedAt']) &&
+        data.keys().hasOnly(['rtKey', 'lastNumber', 'updatedAt']) &&
+        data.rtKey == rtKeyParam &&
+        isValidRtKey(data.rtKey) &&
+        data.lastNumber is int &&
+        data.lastNumber >= 0 &&
+        data.lastNumber <= 999 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidHousehold(data, idParam) {
+      return data.keys().hasAll([
+          'id_rt', 'dusun', 'rw', 'rt', 'rtKey', 'urutan',
+          'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',
+          'status_daftar', 'status_cacah', 'verifikasi_status',
+          'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id_rt', 'dusun', 'rw', 'rt', 'rtKey', 'urutan',
+          'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',
+          'status_daftar', 'catatan_daftar', 'status_cacah',
+          'verifikasi_status', 'verifikasi_catatan', 'verifikasi_oleh', 'verifikasi_waktu',
+          'modul0', 'modulA', 'modulB', 'modulC',
+          'enumerator_email', 'enumerator_name', 'submittedAt',
+          'sheetSynced', 'sheetSyncedAt',
+          'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id_rt == idParam &&
+        isValidHouseholdId(data.id_rt) &&
+        data.dusun in ['D1', 'D2', 'D3', 'D4', 'D5'] &&
+        data.rw is string && data.rw.size() == 2 && data.rw.matches('^[0-9]{2}$') &&
+        data.rt is string && data.rt.size() == 2 && data.rt.matches('^[0-9]{2}$') &&
+        isValidRtKey(data.rtKey) &&
+        data.rtKey == (data.dusun + '-' + data.rw + '-' + data.rt) &&
+        data.urutan is int && data.urutan >= 1 && data.urutan <= 999 &&
+        data.no_bangunan is string && data.no_bangunan.size() >= 1 && data.no_bangunan.size() <= 30 &&
+        data.nama_kk_daftar is string && data.nama_kk_daftar.size() >= 1 && data.nama_kk_daftar.size() <= 150 &&
+        data.alamat is string && data.alamat.size() <= 300 &&
+        data.sumber in ['listing_lapangan', 'daftar_kk_rt', 'data_desa', 'temuan_lapangan'] &&
+        data.status_daftar in ['aktif', 'pindah', 'ganda', 'tidak_ada'] &&
+        (!('catatan_daftar' in data) || (data.catatan_daftar is string && data.catatan_daftar.size() <= 500)) &&
+        data.status_cacah in ['belum_dikunjungi', 'draf', 'tercacah', 'menolak', 'tidak_ditemui', 'rumah_kosong'] &&
+        data.verifikasi_status in ['belum', 'terverifikasi', 'dikembalikan'] &&
+        (!('verifikasi_catatan' in data) || (data.verifikasi_catatan is string && data.verifikasi_catatan.size() <= 500)) &&
+        (!('verifikasi_oleh' in data) || (data.verifikasi_oleh is string && data.verifikasi_oleh.size() <= 200)) &&
+        (!('verifikasi_waktu' in data) || (data.verifikasi_waktu is string && data.verifikasi_waktu.size() <= 60)) &&
+        (!('modul0' in data) || data.modul0 is map) &&
+        (!('modulA' in data) || data.modulA is map) &&
+        (!('modulB' in data) || (data.modulB is list && data.modulB.size() <= 30)) &&
+        (!('modulC' in data) || data.modulC is map) &&
+        (!('enumerator_email' in data) || (data.enumerator_email is string && data.enumerator_email.size() <= 200)) &&
+        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 150)) &&
+        (!('submittedAt' in data) || (data.submittedAt is string && data.submittedAt.size() <= 60)) &&
+        (!('sheetSynced' in data) || data.sheetSynced is bool) &&
+        (!('sheetSyncedAt' in data) || (data.sheetSyncedAt is string && data.sheetSyncedAt.size() <= 60)) &&
+        data.createdBy is string && data.createdBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidHouseholdPii(data, idParam) {
+      return data.keys().hasAll(['id_rt', 'rtKey', 'membersPii', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['id_rt', 'rtKey', 'membersPii', 'updatedBy', 'updatedAt']) &&
+        data.id_rt == idParam &&
+        isValidHouseholdId(data.id_rt) &&
+        isValidRtKey(data.rtKey) &&
+        data.membersPii is list &&
+        data.membersPii.size() <= 30 &&
+        data.updatedBy is string && data.updatedBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidHouseholdPhoto(data, idParam) {
+      return data.keys().hasAll(['id_rt', 'rtKey', 'dataUrl', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['id_rt', 'rtKey', 'dataUrl', 'updatedBy', 'updatedAt']) &&
+        data.id_rt == idParam &&
+        isValidHouseholdId(data.id_rt) &&
+        isValidRtKey(data.rtKey) &&
+        data.dataUrl is string && data.dataUrl.size() <= 450000 &&
+        data.updatedBy is string && data.updatedBy.size() <= 200 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidVisit(data, visitIdParam) {
+      return data.keys().hasAll(['visitId', 'id_rt', 'rtKey', 'dusun', 'rw', 'rt', 'enumerator_email', 'waktu', 'status_kunjungan', 'lokasi', 'createdAt']) &&
+        data.keys().hasOnly(['visitId', 'id_rt', 'rtKey', 'dusun', 'rw', 'rt', 'enumerator_email', 'enumerator_name', 'waktu', 'status_kunjungan', 'kunjungan_ke', 'persetujuan', 'lokasi', 'catatan', 'createdAt']) &&
+        data.visitId == visitIdParam &&
+        isValidId(data.visitId) &&
+        isValidHouseholdId(data.id_rt) &&
+        isValidRtKey(data.rtKey) &&
+        data.dusun in ['D1', 'D2', 'D3', 'D4', 'D5'] &&
+        data.rw is string && data.rw.size() == 2 &&
+        data.rt is string && data.rt.size() == 2 &&
+        data.enumerator_email is string && data.enumerator_email.size() <= 200 &&
+        (!('enumerator_name' in data) || (data.enumerator_name is string && data.enumerator_name.size() <= 150)) &&
+        data.waktu is string && data.waktu.size() <= 60 &&
+        data.status_kunjungan in ['ditemui', 'tidak_ditemui', 'rumah_kosong'] &&
+        (!('kunjungan_ke' in data) || (data.kunjungan_ke is int && data.kunjungan_ke >= 1 && data.kunjungan_ke <= 3)) &&
+        (!('persetujuan' in data) || data.persetujuan in ['ya', 'tidak']) &&
+        data.lokasi is map &&
+        (!('catatan' in data) || (data.catatan is string && data.catatan.size() <= 500)) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidRevisionLog(data, logIdParam) {
+      return data.keys().hasAll(['logId', 'id_rt', 'rtKey', 'changedByEmail', 'changedByName', 'changedByRole', 'changedAt', 'fieldPath', 'oldValue', 'newValue', 'reason']) &&
+        data.keys().hasOnly(['logId', 'id_rt', 'rtKey', 'changedByEmail', 'changedByName', 'changedByRole', 'changedAt', 'fieldPath', 'oldValue', 'newValue', 'reason']) &&
+        data.logId == logIdParam &&
+        isValidId(data.logId) &&
+        isValidHouseholdId(data.id_rt) &&
+        isValidRtKey(data.rtKey) &&
+        data.changedByEmail is string && data.changedByEmail.lower() == myEmail() &&
+        data.changedByName is string && data.changedByName.size() <= 150 &&
+        data.changedByRole in ['admin', 'koordinator', 'enumerator'] &&
+        data.changedAt == request.time &&
+        data.fieldPath is string && data.fieldPath.size() >= 1 && data.fieldPath.size() <= 200 &&
+        data.oldValue is string && data.oldValue.size() <= 1000 &&
+        data.newValue is string && data.newValue.size() <= 1000 &&
+        data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500;
+    }
+
+    // --- Collection Rules ---
+
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /config/wilayah {
+      allow get: if isActiveStaff();
+      allow create, update: if isAdmin() && isValidWilayahConfig(incoming());
+    }
+
+    match /config/spreadsheet {
+      allow get: if isActiveStaff();
+      allow create, update: if isAdmin() && isValidSpreadsheetConfig(incoming());
+    }
+
+    match /staff_members/{email} {
+      allow get: if isVerifiedEmail() && isValidEmailKey(email) && (
+        email == myEmail() || isAdmin() || isKoordinator()
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() ||
+        (isKoordinator() && (resource.data.role == 'enumerator' || resource.data.email == myEmail()))
+      );
+      allow create: if isVerifiedEmail() && isValidEmailKey(email) && isValidStaffMember(incoming(), email) &&
+        incoming().createdAt == request.time && (
+          isAdmin() ||
+          (isKoordinator() && incoming().role == 'enumerator')
+        );
+      allow update: if isVerifiedEmail() && isValidEmailKey(email) && isValidStaffMember(incoming(), email) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().email == existing().email && (
+          isAdmin() ||
+          (isKoordinator() && existing().role == 'enumerator' && incoming().role == 'enumerator')
+        );
+      allow delete: if isAdmin() && isValidEmailKey(email) && email != 'arisriswanto057@gmail.com';
+    }
+
+    match /rt_counters/{rtKey} {
+      allow get: if isVerifiedEmail() && isValidRtKey(rtKey) && isAssignedToRt(rtKey);
+      allow create: if isVerifiedEmail() && isValidRtKey(rtKey) && isAssignedToRt(rtKey) &&
+        isValidRtCounter(incoming(), rtKey);
+      allow update: if isVerifiedEmail() && isValidRtKey(rtKey) && isAssignedToRt(rtKey) &&
+        isValidRtCounter(incoming(), rtKey) &&
+        incoming().lastNumber >= existing().lastNumber;
+    }
+
+    match /households/{id_rt} {
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
+        isAdmin() || isAssignedToRt(existing().rtKey)
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() || isAssignedToRt(resource.data.rtKey)
+      );
+      allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHousehold(incoming(), id_rt) &&
+        incoming().createdAt == request.time &&
+        incoming().verifikasi_status == 'belum' &&
+        isAssignedToRt(incoming().rtKey);
+      allow update: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHousehold(incoming(), id_rt) &&
+        incoming().id_rt == existing().id_rt &&
+        incoming().dusun == existing().dusun &&
+        incoming().rw == existing().rw &&
+        incoming().rt == existing().rt &&
+        incoming().rtKey == existing().rtKey &&
+        incoming().urutan == existing().urutan &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (isKoordinator() && isAssignedToRt(existing().rtKey)) ||
+          (
+            isEnumerator() &&
+            isAssignedToRt(existing().rtKey) &&
+            (
+              incoming().verifikasi_status == existing().verifikasi_status ||
+              (existing().verifikasi_status == 'dikembalikan' && incoming().verifikasi_status == 'belum')
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',
+              'status_daftar', 'catatan_daftar', 'status_cacah',
+              'verifikasi_status', 'modul0', 'modulA', 'modulB', 'modulC',
+              'enumerator_email', 'enumerator_name', 'submittedAt',
+              'sheetSynced', 'sheetSyncedAt', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /household_pii/{id_rt} {
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
+        isAdmin() || isAssignedToRt(existing().rtKey)
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() || isAssignedToRt(resource.data.rtKey)
+      );
+      allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHouseholdPii(incoming(), id_rt) &&
+        isAssignedToRt(incoming().rtKey);
+      allow update: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHouseholdPii(incoming(), id_rt) &&
+        incoming().id_rt == existing().id_rt &&
+        incoming().rtKey == existing().rtKey &&
+        isAssignedToRt(existing().rtKey);
+      allow delete: if false;
+    }
+
+    match /household_photos/{id_rt} {
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
+        isAdmin() || isAssignedToRt(existing().rtKey)
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() || isAssignedToRt(resource.data.rtKey)
+      );
+      allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHouseholdPhoto(incoming(), id_rt) &&
+        isAssignedToRt(incoming().rtKey);
+      allow update: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isValidHouseholdPhoto(incoming(), id_rt) &&
+        incoming().id_rt == existing().id_rt &&
+        incoming().rtKey == existing().rtKey &&
+        isAssignedToRt(existing().rtKey);
+      allow delete: if false;
+    }
+
+    match /visits/{visitId} {
+      allow get: if isVerifiedEmail() && isValidId(visitId) && (
+        isAdmin() || isAssignedToRt(existing().rtKey)
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() || isAssignedToRt(resource.data.rtKey)
+      );
+      allow create: if isVerifiedEmail() && isValidId(visitId) &&
+        isValidVisit(incoming(), visitId) &&
+        isAssignedToRt(incoming().rtKey);
+      allow update, delete: if false;
+    }
+
+    match /revision_logs/{logId} {
+      allow get: if isVerifiedEmail() && isValidId(logId) && (
+        isAdmin() || isAssignedToRt(existing().rtKey)
+      );
+      allow list: if isVerifiedEmail() && (
+        isAdmin() || isAssignedToRt(resource.data.rtKey)
+      );
+      allow create: if isVerifiedEmail() && isValidId(logId) &&
+        isValidRevisionLog(incoming(), logId) &&
+        isAssignedToRt(incoming().rtKey);
+      allow update, delete: if false;
+    }
+  }
+}
