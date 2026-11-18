@@ -80,12 +80,39 @@ service cloud.firestore {
       return isVerifiedEmail() && hasStaffDoc() && staffData().active == true && staffData().role == 'enumerator';
     }
 
+    function isStaffAssignedToRt(staff, rtKey) {
+      return staff.active == true && (
+        staff.role == 'admin' ||
+        (staff.assignedRTs is list && rtKey in staff.assignedRTs)
+      );
+    }
+
     function isAssignedToRt(rtKey) {
-      return isAdmin() || (
-        isActiveStaff() &&
-        hasStaffDoc() &&
-        staffData().assignedRTs is list &&
-        rtKey in staffData().assignedRTs
+      return isVerifiedEmail() && (
+        myEmail() == 'arisriswanto057@gmail.com' ||
+        (hasStaffDoc() && isStaffAssignedToRt(staffData(), rtKey))
+      );
+    }
+
+    function canUpdateHouseholdWithStaff(staff, existingData, incomingData) {
+      return staff.active == true && (
+        staff.role == 'admin' ||
+        (
+          staff.role in ['enumerator', 'koordinator'] &&
+          staff.assignedRTs is list &&
+          existingData.rtKey in staff.assignedRTs &&
+          (
+            incomingData.verifikasi_status == existingData.verifikasi_status ||
+            incomingData.verifikasi_status == 'belum'
+          ) &&
+          incomingData.diff(existingData).affectedKeys().hasOnly([
+            'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',
+            'status_daftar', 'catatan_daftar', 'status_cacah',
+            'verifikasi_status', 'modul0', 'modulA', 'modulB', 'modulC',
+            'enumerator_email', 'enumerator_name', 'submittedAt',
+            'sheetSynced', 'sheetSyncedAt', 'updatedAt'
+          ])
+        )
       );
     }
 
@@ -311,12 +338,10 @@ service cloud.firestore {
     }
 
     match /households/{id_rt} {
-      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
-        isAdmin() || isAssignedToRt(existing().rtKey)
-      );
-      allow list: if isVerifiedEmail() && (
-        isAdmin() || isAssignedToRt(resource.data.rtKey)
-      );
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isAssignedToRt(existing().rtKey);
+      allow list: if isVerifiedEmail() &&
+        isAssignedToRt(resource.data.rtKey);
       allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
         isValidHousehold(incoming(), id_rt) &&
         incoming().createdAt == request.time &&
@@ -332,33 +357,17 @@ service cloud.firestore {
         incoming().urutan == existing().urutan &&
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt && (
-          isAdmin() ||
-          (
-            (isEnumerator() || isKoordinator()) &&
-            isAssignedToRt(existing().rtKey) &&
-            (
-              incoming().verifikasi_status == existing().verifikasi_status ||
-              incoming().verifikasi_status == 'belum'
-            ) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'no_bangunan', 'nama_kk_daftar', 'alamat', 'sumber',
-              'status_daftar', 'catatan_daftar', 'status_cacah',
-              'verifikasi_status', 'modul0', 'modulA', 'modulB', 'modulC',
-              'enumerator_email', 'enumerator_name', 'submittedAt',
-              'sheetSynced', 'sheetSyncedAt', 'updatedAt'
-            ])
-          )
+          myEmail() == 'arisriswanto057@gmail.com' ||
+          (hasStaffDoc() && canUpdateHouseholdWithStaff(staffData(), existing(), incoming()))
         );
       allow delete: if false;
     }
 
     match /household_pii/{id_rt} {
-      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
-        isAdmin() || isAssignedToRt(existing().rtKey)
-      );
-      allow list: if isVerifiedEmail() && (
-        isAdmin() || isAssignedToRt(resource.data.rtKey)
-      );
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isAssignedToRt(existing().rtKey);
+      allow list: if isVerifiedEmail() &&
+        isAssignedToRt(resource.data.rtKey);
       allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
         isValidHouseholdPii(incoming(), id_rt) &&
         isAssignedToRt(incoming().rtKey);
@@ -371,12 +380,10 @@ service cloud.firestore {
     }
 
     match /household_photos/{id_rt} {
-      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) && (
-        isAdmin() || isAssignedToRt(existing().rtKey)
-      );
-      allow list: if isVerifiedEmail() && (
-        isAdmin() || isAssignedToRt(resource.data.rtKey)
-      );
+      allow get: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
+        isAssignedToRt(existing().rtKey);
+      allow list: if isVerifiedEmail() &&
+        isAssignedToRt(resource.data.rtKey);
       allow create: if isVerifiedEmail() && isValidHouseholdId(id_rt) &&
         isValidHouseholdPhoto(incoming(), id_rt) &&
         isAssignedToRt(incoming().rtKey);
@@ -389,12 +396,10 @@ service cloud.firestore {
     }
 
     match /visits/{visitId} {
-      allow get: if isVerifiedEmail() && isValidId(visitId) && (
-        isAdmin() || isAssignedToRt(existing().rtKey)
-      );
-      allow list: if isVerifiedEmail() && (
-        isAdmin() || isAssignedToRt(resource.data.rtKey)
-      );
+      allow get: if isVerifiedEmail() && isValidId(visitId) &&
+        isAssignedToRt(existing().rtKey);
+      allow list: if isVerifiedEmail() &&
+        isAssignedToRt(resource.data.rtKey);
       allow create: if isVerifiedEmail() && isValidId(visitId) &&
         isValidVisit(incoming(), visitId) &&
         isAssignedToRt(incoming().rtKey);
@@ -402,12 +407,10 @@ service cloud.firestore {
     }
 
     match /revision_logs/{logId} {
-      allow get: if isVerifiedEmail() && isValidId(logId) && (
-        isAdmin() || isAssignedToRt(existing().rtKey)
-      );
-      allow list: if isVerifiedEmail() && (
-        isAdmin() || isAssignedToRt(resource.data.rtKey)
-      );
+      allow get: if isVerifiedEmail() && isValidId(logId) &&
+        isAssignedToRt(existing().rtKey);
+      allow list: if isVerifiedEmail() &&
+        isAssignedToRt(resource.data.rtKey);
       allow create: if isVerifiedEmail() && isValidId(logId) &&
         isValidRevisionLog(incoming(), logId) &&
         isAssignedToRt(incoming().rtKey);
