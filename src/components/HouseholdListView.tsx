@@ -6,6 +6,7 @@ import {
   Plus,
   Search,
   Tag,
+  Trash2,
   WifiOff,
 } from 'lucide-react';
 import {
@@ -40,6 +41,7 @@ interface HouseholdListViewProps {
   hasFirebaseUser: boolean;
   pendingSyncIds: Set<string>;
   onOpenQuestionnaire: (h: HouseholdRecord) => void;
+  onAdminDeleteHousehold?: (h: HouseholdRecord) => Promise<void>;
 }
 
 export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
@@ -50,6 +52,7 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   hasFirebaseUser,
   pendingSyncIds,
   onOpenQuestionnaire,
+  onAdminDeleteHousehold,
 }) => {
   const isAdmin = profile.role === 'admin';
   const isProvisionalOffline = profile.createdBy === 'offline-provisional';
@@ -92,6 +95,11 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   const [editStatusDaftar, setEditStatusDaftar] = useState<StatusDaftar>('aktif');
   const [editCatatanDaftar, setEditCatatanDaftar] = useState('');
   const [savingMasterStatus, setSavingMasterStatus] = useState(false);
+
+  // Admin Delete Single Household Modal
+  const [deleteTarget, setDeleteTarget] = useState<HouseholdRecord | null>(null);
+  const [deletingSingle, setDeletingSingle] = useState(false);
+  const [deleteSingleErr, setDeleteSingleErr] = useState<string | null>(null);
 
   const dusunOptions = useMemo(() => {
     const set = new Set(availableRtOptions.map((o) => o.dusun));
@@ -458,7 +466,7 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
                     )}
                   </div>
 
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="flex flex-wrap shrink-0 items-center gap-2">
                     <button
                       type="button"
                       onClick={() => {
@@ -484,6 +492,20 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
                           : 'Buka Isian'}
                       </span>
                     </button>
+                    {isAdmin && onAdminDeleteHousehold && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteSingleErr(null);
+                          setDeleteTarget(h);
+                        }}
+                        title="Hapus permanen data rumah tangga ini (Admin)"
+                        className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800 hover:bg-rose-100"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        <span>Hapus</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -688,6 +710,56 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Modal Konfirmasi Hapus Data Rumah Tangga (Khusus Admin) */}
+      {deleteTarget && onAdminDeleteHousehold && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-300 bg-white p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 text-rose-700">
+              <Trash2 className="h-5 w-5 shrink-0" />
+              <h3 className="text-lg font-extrabold">Hapus Data Rumah Tangga?</h3>
+            </div>
+            <p className="text-sm leading-relaxed text-slate-700">
+              Data <span className="font-mono font-bold">{deleteTarget.id_rt}</span> (
+              <strong>{deleteTarget.nama_kk_daftar}</strong>) beserta isian sensus, foto rumah,
+              identitas, riwayat kunjungan, dan baris terkait di Google Spreadsheet akan dihapus
+              permanen.
+            </p>
+            {deleteSingleErr && (
+              <p className="text-xs font-semibold text-rose-700">{deleteSingleErr}</p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={deletingSingle}
+                onClick={() => setDeleteTarget(null)}
+                className="min-h-[44px] rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-800"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deletingSingle}
+                onClick={async () => {
+                  setDeletingSingle(true);
+                  setDeleteSingleErr(null);
+                  try {
+                    await onAdminDeleteHousehold(deleteTarget);
+                    setDeleteTarget(null);
+                  } catch (err: any) {
+                    setDeleteSingleErr(err?.message || 'Gagal menghapus data rumah tangga.');
+                  } finally {
+                    setDeletingSingle(false);
+                  }
+                }}
+                className="min-h-[44px] rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:opacity-50"
+              >
+                {deletingSingle ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

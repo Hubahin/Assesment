@@ -1,19 +1,49 @@
 import React, { useMemo, useState } from 'react';
-import { Edit3, Plus, Trash2, UserCheck, Users } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  Edit3,
+  ExternalLink,
+  FileSpreadsheet,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Upload,
+  UserCheck,
+  Users,
+} from 'lucide-react';
 import { DUSUN_LIST } from '../data/instrumentSpec';
-import { BOOTSTRAP_ADMIN_EMAIL, deleteStaffMember, upsertStaffMember } from '../services/firestoreService';
-import { StaffMember, UserRole, WilayahConfig } from '../types/census';
+import {
+  BOOTSTRAP_ADMIN_EMAIL,
+  deleteStaffMember,
+  syncStaffMembersFromSpreadsheet,
+  upsertStaffMember,
+} from '../services/firestoreService';
+import {
+  fetchStaffFromWebhook,
+  parseSpreadsheetStaffRows,
+  pushStaffToWebhook,
+  pushStaffUpsertSafeToWebhook,
+} from '../services/googleSheetsService';
+import { SpreadsheetConfig, StaffMember, UserRole, WilayahConfig } from '../types/census';
 
 interface StaffManagementViewProps {
   profile: StaffMember;
   wilayah: WilayahConfig;
   staffList: StaffMember[];
+  spreadsheetConfig: SpreadsheetConfig | null;
+  isOnline: boolean;
+  onStaffSyncedToSheet?: () => void;
 }
 
 export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   profile,
   wilayah,
   staffList,
+  spreadsheetConfig,
+  isOnline,
+  onStaffSyncedToSheet,
 }) => {
   const isAdmin = profile.role === 'admin';
   const [showModal, setShowModal] = useState(false);
@@ -26,6 +56,12 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const [saving, setSaving] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [rwPickerDusun, setRwPickerDusun] = useState<string>('D1');
+
+  // Spreadsheet Bulk Staff Sync State
+  const [sheetBusy, setSheetBusy] = useState<'pull' | 'push' | null>(null);
+  const [sheetMsg, setSheetMsg] = useState<string | null>(null);
+  const [sheetErr, setSheetErr] = useState<string | null>(null);
+  const [sheetRowErrors, setSheetRowErrors] = useState<string[]>([]);
 
   const allRtsByDusun = useMemo(() => {
     const map = new Map<string, { rw: string; rts: string[] }[]>();
@@ -97,20 +133,82 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
       setErrMsg('Koordinator hanya dapat mendaftarkan atau mengubah Enumerator.');
       return;
     }
+
+    const effectiveRole: UserRole = isAdmin ? role : 'enumerator';
+    const effectiveAssignedRTs = effectiveRole === 'admin' ? [] : assignedRTs;
+    const savedStaff: StaffMember = {
+      email: cleanEmail,
+      name: name.trim(),
+      role: effectiveRole,
+      assignedRTs: effectiveAssignedRTs,
+      koordinatorEmail: !isAdmin ? profile.email : undefined,
+      active,
+      createdBy: profile.email,
+    };
+
     setSaving(true);
     setErrMsg(null);
+    setSheetMsg(null);
+    setSheetErr(null);
+    setSheetRowErrors([]);
+
     try {
       await upsertStaffMember(
         {
-          email: cleanEmail,
-          name: name.trim(),
-          role: isAdmin ? role : 'enumerator',
-          assignedRTs,
-          koordinatorEmail: !isAdmin ? profile.email : undefined,
-          active,
+          email: savedStaff.email,
+          name: savedStaff.name,
+          role: savedStaff.role,
+          assignedRTs: savedStaff.assignedRTs,
+          koordinatorEmail: savedStaff.koordinatorEmail,
+          active: savedStaff.active,
         },
         profile.email
       );
+
+      if (spreadsheetConfig?.webhookUrl && isOnline) {
+        try {
+          const updatedAdminStaffList = isAdmin
+            ? (() => {
+                const exists = staffList.some(
+                  (s) => s.email.toLowerCase() === savedStaff.email
+                );
+                const next = exists
+                  ? staffList.map((s) =>
+                      s.email.toLowerCase() === savedStaff.email
+                        ? { ...s, ...savedStaff }
+                        : s
+                    )
+                  : [...staffList, savedStaff];
+                return [...next].sort((a, b) => a.name.localeCompare(b.name, 'id'));
+              })()
+            : undefined;
+
+          await pushStaffUpsertSafeToWebhook({
+            webhookUrl: spreadsheetConfig.webhookUrl,
+            actorRole: profile.role,
+            savedStaff,
+            updatedAdminStaffList,
+            wilayah,
+          });
+          onStaffSyncedToSheet?.();
+          setSheetMsg(
+            `Petugas "${savedStaff.name}" (${savedStaff.email} · role: ${savedStaff.role}) tersimpan di aplikasi dan otomatis dikirim ke tab "petugas" Google Spreadsheet.`
+          );
+        } catch (sheetPushErr: any) {
+          setSheetErr(
+            `Petugas tersimpan di aplikasi, namun gagal mengirim ke Google Spreadsheet: ${sheetPushErr?.message || 'Periksa koneksi atau URL Web App Apps Script.'}`
+          );
+        }
+      } else if (spreadsheetConfig?.webhookUrl && !isOnline) {
+        setSheetMsg(
+          `Petugas "${savedStaff.name}" tersimpan di aplikasi (perangkat sedang luring). Klik "Kirim Daftar Petugas ke Tab \\"petugas\\"" saat daring agar Spreadsheet ikut terbarui.`
+        );
+      } else {
+        setSheetMsg(
+          `Petugas "${savedStaff.name}" tersimpan di aplikasi. Atur URL Web App Spreadsheet di menu Admin & Sheet jika ingin otomatis masuk ke tab "petugas".`
+        );
+      }
+
       setShowModal(false);
     } catch (err: any) {
       setErrMsg(err?.message || 'Gagal menyimpan data petugas.');
@@ -121,7 +219,109 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
 
   const handleDelete = async (targetEmail: string) => {
     if (!isAdmin || targetEmail === BOOTSTRAP_ADMIN_EMAIL) return;
+    setSheetMsg(null);
+    setSheetErr(null);
     await deleteStaffMember(targetEmail);
+
+    if (spreadsheetConfig?.webhookUrl && isOnline) {
+      try {
+        const remainingList = staffList.filter(
+          (s) => s.email.toLowerCase() !== targetEmail.toLowerCase()
+        );
+        await pushStaffToWebhook(spreadsheetConfig.webhookUrl, remainingList);
+        onStaffSyncedToSheet?.();
+        setSheetMsg(
+          `Petugas ${targetEmail} dihapus dari aplikasi dan tab "petugas" Google Spreadsheet telah diperbarui.`
+        );
+      } catch (sheetPushErr: any) {
+        setSheetErr(
+          `Petugas dihapus dari aplikasi, tetapi gagal memperbarui Spreadsheet: ${sheetPushErr?.message || 'Coba tekan Kirim Daftar Petugas secara manual.'}`
+        );
+      }
+    }
+  };
+
+  const handlePullFromSpreadsheet = async () => {
+    if (!spreadsheetConfig?.webhookUrl || !isOnline) return;
+    setSheetBusy('pull');
+    setSheetMsg(null);
+    setSheetErr(null);
+    setSheetRowErrors([]);
+    try {
+      const res = await syncStaffMembersFromSpreadsheet({
+        webhookUrl: spreadsheetConfig.webhookUrl,
+        wilayah,
+        actorEmail: profile.email,
+        actorRole: profile.role,
+        replaceRemoved: isAdmin,
+      });
+      setSheetRowErrors(res.errors);
+      if (res.emptySheet) {
+        setSheetMsg(
+          'Tab "petugas" di Google Spreadsheet masih kosong. Klik "Kirim Daftar Petugas ke Tab \\"petugas\\"" untuk membuat contoh kolom & mengisi daftar awal.'
+        );
+      } else {
+        setSheetMsg(
+          `Sinkronisasi dari Spreadsheet selesai (${res.totalSheetRows} baris dibaca): ${res.created} ditambahkan, ${res.updated} diperbarui, ${res.removed} dihapus/diganti emailnya, ${res.unchanged} sudah sesuai.`
+        );
+      }
+    } catch (err: any) {
+      setSheetErr(err?.message || 'Gagal mengambil daftar petugas dari Google Spreadsheet.');
+    } finally {
+      setSheetBusy(null);
+    }
+  };
+
+  const handlePushToSpreadsheet = async () => {
+    if (!spreadsheetConfig?.webhookUrl || !isOnline) return;
+    setSheetBusy('push');
+    setSheetMsg(null);
+    setSheetErr(null);
+    setSheetRowErrors([]);
+    try {
+      if (isAdmin) {
+        await pushStaffToWebhook(spreadsheetConfig.webhookUrl, visibleStaff);
+        onStaffSyncedToSheet?.();
+        setSheetMsg(
+          `Berhasil mengirim ${visibleStaff.length} data petugas ke tab "petugas" di Google Spreadsheet. Sekarang Anda dapat mengedit, menambah massal, atau mengubah email langsung di tab tersebut.`
+        );
+      } else {
+        const rawRows = await fetchStaffFromWebhook(spreadsheetConfig.webhookUrl);
+        const { validRows } = parseSpreadsheetStaffRows(rawRows, wilayah);
+        const mergedMap = new Map<string, StaffMember>();
+        for (const r of validRows) {
+          if (r.role !== 'enumerator') {
+            mergedMap.set(r.email.toLowerCase(), {
+              email: r.email.toLowerCase(),
+              name: r.name,
+              role: r.role,
+              assignedRTs: r.assignedRTs,
+              koordinatorEmail: r.koordinatorEmail,
+              active: r.active,
+              createdBy: 'spreadsheet',
+            });
+          }
+        }
+        for (const enumStaff of visibleStaff) {
+          mergedMap.set(enumStaff.email.toLowerCase(), enumStaff);
+        }
+        const mergedList = Array.from(mergedMap.values()).sort((a, b) =>
+          a.name.localeCompare(b.name, 'id')
+        );
+        await pushStaffToWebhook(spreadsheetConfig.webhookUrl, mergedList);
+        onStaffSyncedToSheet?.();
+        setSheetMsg(
+          `Berhasil mengirim ${visibleStaff.length} data Enumerator ke tab "petugas" di Google Spreadsheet tanpa menghapus baris Admin & Koordinator.`
+        );
+      }
+    } catch (err: any) {
+      setSheetErr(
+        err?.message ||
+          'Gagal mengirim daftar petugas ke Google Spreadsheet. Jika masuk sebagai Koordinator, pastikan Apps Script sudah diperbarui agar mendukung fungsi baca (doGet) atau minta Admin mengirim daftar lengkap.'
+      );
+    } finally {
+      setSheetBusy(null);
+    }
   };
 
   const roleLabels: Record<UserRole, string> = {
@@ -139,8 +339,8 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
           </h2>
           <p className="text-xs text-slate-600">
             {isAdmin
-              ? 'Admin dapat mendaftarkan Admin, Koordinator Enumerator, dan Enumerator serta mengatur RT tugas.'
-              : 'Koordinator Enumerator dapat mendaftarkan, mengubah, dan menugaskan Enumerator ke RT.'}
+              ? 'Admin dapat menambah/mengubah petugas langsung di aplikasi (email & role otomatis masuk ke tab "petugas" Spreadsheet) atau input massal lewat Google Spreadsheet.'
+              : 'Koordinator Enumerator dapat mendaftarkan Enumerator di aplikasi (otomatis masuk ke tab "petugas" Spreadsheet) maupun menarik pembaruan dari Spreadsheet.'}
           </p>
         </div>
 
@@ -152,6 +352,129 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
           <Plus className="h-4 w-4" />
           <span>{isAdmin ? 'Tambah Petugas' : 'Tambah Enumerator'}</span>
         </button>
+      </div>
+
+      {/* Google Spreadsheet Bulk Staff Management Card */}
+      <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800">
+              <FileSpreadsheet className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-extrabold text-slate-950">
+                Sinkronisasi Dua Arah Google Spreadsheet (Acuan Login)
+              </h3>
+              <p className="mt-0.5 text-xs leading-relaxed text-slate-600">
+                Petugas yang ditambahkan atau diubah di aplikasi otomatis dikirim ke tab{' '}
+                <code className="rounded bg-slate-100 px-1 py-0.5 font-mono font-bold text-slate-900">
+                  petugas
+                </code>{' '}
+                Spreadsheet. Anda juga tetap bisa input massal atau ganti email langsung di tab
+                tersebut lalu menariknya ke aplikasi.
+              </p>
+            </div>
+          </div>
+
+          {spreadsheetConfig?.spreadsheetUrl && (
+            <a
+              href={spreadsheetConfig.spreadsheetUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-900 hover:bg-emerald-100"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span>Buka Spreadsheet</span>
+            </a>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-700 space-y-1">
+          <p className="font-bold text-slate-900">
+            Format Kolom Tab <span className="font-mono">petugas</span>:
+          </p>
+          <p className="font-mono text-slate-900">
+            email | nama | role | rt_tugas | aktif | koordinator_email
+          </p>
+          <p>
+            • <strong>role</strong>: <code>enumerator</code>, <code>koordinator</code>, atau{' '}
+            <code>admin</code> · <strong>aktif</strong>: <code>ya</code> / <code>tidak</code>
+          </p>
+          <p>
+            • <strong>rt_tugas</strong>: pisahkan dengan koma (mis.{' '}
+            <code>D1-01-01, D1-01-02</code>) atau tulis kode RW untuk semua RT di RW tersebut (mis.{' '}
+            <code>D1-01</code>).
+          </p>
+        </div>
+
+        {!spreadsheetConfig?.webhookUrl ? (
+          <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>
+              Tautan Google Spreadsheet belum diatur. Atur URL Web App Apps Script di menu{' '}
+              <strong>Admin &amp; Sheet</strong> terlebih dahulu.
+            </span>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={!isOnline || sheetBusy !== null}
+              onClick={handlePullFromSpreadsheet}
+              className="inline-flex min-h-[42px] items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+            >
+              {sheetBusy === 'pull' ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+              <span>
+                {sheetBusy === 'pull'
+                  ? 'Menarik dari Spreadsheet...'
+                  : 'Tarik & Sinkron dari Spreadsheet'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!isOnline || sheetBusy !== null}
+              onClick={handlePushToSpreadsheet}
+              className="inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+            >
+              <Upload className="h-4 w-4" />
+              <span>
+                {sheetBusy === 'push'
+                  ? 'Mengirim ke Spreadsheet...'
+                  : 'Kirim Daftar Petugas ke Tab "petugas"'}
+              </span>
+            </button>
+          </div>
+        )}
+
+        {sheetMsg && (
+          <div className="flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 p-3 text-xs font-semibold text-emerald-950">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+            <span>{sheetMsg}</span>
+          </div>
+        )}
+
+        {sheetErr && (
+          <div className="flex items-start gap-2 rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs font-semibold text-rose-950">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-700" />
+            <span>{sheetErr}</span>
+          </div>
+        )}
+
+        {sheetRowErrors.length > 0 && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+            <p className="font-bold">Catatan baris di Spreadsheet yang dilewati/perlu diperiksa:</p>
+            <ul className="mt-1 list-disc pl-4 space-y-0.5">
+              {sheetRowErrors.slice(0, 8).map((er, i) => (
+                <li key={i}>{er}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <div className="space-y-2.5">

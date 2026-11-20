@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   runTransaction,
@@ -11,6 +12,7 @@ import {
   Unsubscribe,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { DEFAULT_RW_MAPPINGS_85 } from '../data/instrumentSpec';
@@ -32,8 +34,13 @@ import {
   WilayahConfig,
 } from '../types/census';
 import { cleanCensusData, computeJsonDiffs, stripUndefined } from '../utils/xlsformValidation';
-import { appendSubmissionViaWebhook } from './googleSheetsService';
 import {
+  appendSubmissionViaWebhook,
+  fetchStaffFromWebhook,
+  parseSpreadsheetStaffRows,
+} from './googleSheetsService';
+import {
+  clearAllCensusLocalData,
   deleteOfflinePhoto,
   enqueueOfflineItem,
   getOfflinePhoto,
@@ -41,6 +48,7 @@ import {
   loadOfflineSession,
   OfflineQueueItem,
   remapTempIdInQueue,
+  removeHouseholdLocalData,
   removeOfflineQueueItem,
   saveOfflinePhoto,
   updateOfflineQueueItem,
@@ -1359,4 +1367,255 @@ export async function verifyHouseholdSubmission(params: {
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `verify/${household.id_rt}`);
   }
+}
+
+export async function deleteSingleHouseholdRecord(id_rt: string): Promise<void> {
+  if (id_rt.startsWith('LOCAL-')) {
+    await removeHouseholdLocalData(id_rt);
+    return;
+  }
+
+  try {
+    const refsToDelete = [
+      doc(db, 'households', id_rt),
+      doc(db, 'household_pii', id_rt),
+      doc(db, 'household_photos', id_rt),
+    ];
+
+    const visitsSnap = await getDocs(
+      query(collection(db, 'visits'), where('id_rt', '==', id_rt))
+    );
+    visitsSnap.docs.forEach((d) => refsToDelete.push(d.ref));
+
+    const logsSnap = await getDocs(
+      query(collection(db, 'revision_logs'), where('id_rt', '==', id_rt))
+    );
+    logsSnap.docs.forEach((d) => refsToDelete.push(d.ref));
+
+    for (let i = 0; i < refsToDelete.length; i += 400) {
+      const batch = writeBatch(db);
+      for (const ref of refsToDelete.slice(i, i + 400)) {
+        batch.delete(ref);
+      }
+      await batch.commit();
+    }
+
+    await removeHouseholdLocalData(id_rt);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `households/${id_rt}`);
+  }
+}
+
+export async function resetAllCensusData(
+  onProgress?: (label: string) => void
+): Promise<{ deletedCount: number }> {
+  const collectionsToClear = [
+    { name: 'households', label: 'data rumah tangga' },
+    { name: 'household_pii', label: 'identitas responden' },
+    { name: 'household_photos', label: 'foto rumah' },
+    { name: 'visits', label: 'riwayat kunjungan' },
+    { name: 'revision_logs', label: 'log revisi' },
+    { name: 'rt_counters', label: 'penomoran otomatis RT' },
+  ];
+
+  let deletedCount = 0;
+  for (const colInfo of collectionsToClear) {
+    onProgress?.(`Menghapus ${colInfo.label}...`);
+    try {
+      const snap = await getDocs(collection(db, colInfo.name));
+      const docs = snap.docs;
+      for (let i = 0; i < docs.length; i += 400) {
+        const batch = writeBatch(db);
+        for (const d of docs.slice(i, i + 400)) {
+          batch.delete(d.ref);
+        }
+        await batch.commit();
+        deletedCount += docs.slice(i, i + 400).length;
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, colInfo.name);
+    }
+  }
+
+  onProgress?.('Membersihkan cache & draf lokal...');
+  await clearAllCensusLocalData();
+  return { deletedCount };
+}
+
+export interface StaffSyncResult {
+  created: number;
+  updated: number;
+  removed: number;
+  unchanged: number;
+  totalSheetRows: number;
+  errors: string[];
+  emptySheet: boolean;
+}
+
+export async function syncStaffMembersFromSpreadsheet(params: {
+  webhookUrl: string;
+  wilayah: WilayahConfig;
+  actorEmail: string;
+  actorRole: UserRole;
+  replaceRemoved?: boolean;
+}): Promise<StaffSyncResult> {
+  const {
+    webhookUrl,
+    wilayah,
+    actorEmail,
+    actorRole,
+    replaceRemoved = true,
+  } = params;
+
+  const rawRows = await fetchStaffFromWebhook(webhookUrl);
+  const { validRows, errors } = parseSpreadsheetStaffRows(rawRows, wilayah);
+
+  const scopedRows =
+    actorRole === 'koordinator'
+      ? validRows.filter((r) => r.role === 'enumerator')
+      : validRows;
+
+  if (scopedRows.length === 0) {
+    return {
+      created: 0,
+      updated: 0,
+      removed: 0,
+      unchanged: 0,
+      totalSheetRows: 0,
+      errors,
+      emptySheet: true,
+    };
+  }
+
+  const actorLower = actorEmail.trim().toLowerCase();
+  const staffCol = collection(db, 'staff_members');
+  const existingSnap = await getDocs(
+    actorRole === 'admin' ? staffCol : query(staffCol, where('role', '==', 'enumerator'))
+  );
+
+  const existingMap = new Map<string, Record<string, any>>();
+  for (const d of existingSnap.docs) {
+    existingMap.set(d.id.toLowerCase(), d.data());
+  }
+
+  type BatchOp =
+    | { kind: 'set'; email: string; payload: Record<string, any> }
+    | { kind: 'delete'; email: string };
+  const ops: BatchOp[] = [];
+
+  let created = 0;
+  let updated = 0;
+  let removed = 0;
+  let unchanged = 0;
+
+  const targetEmailSet = new Set<string>();
+
+  for (const row of scopedRows) {
+    const emailLower = row.email.toLowerCase();
+    targetEmailSet.add(emailLower);
+
+    // Jangan pernah mencabut akses Admin Bootstrap utama secara tidak sengaja
+    const effectiveRole: UserRole =
+      emailLower === BOOTSTRAP_ADMIN_EMAIL ? 'admin' : row.role;
+    const effectiveActive =
+      emailLower === BOOTSTRAP_ADMIN_EMAIL ? true : row.active;
+    const effectiveRts =
+      effectiveRole === 'admin' ? [] : [...row.assignedRTs].slice(0, 120);
+
+    const prev = existingMap.get(emailLower);
+    const nextSortedRts = [...effectiveRts].sort().join(',');
+
+    if (prev) {
+      const prevRts = Array.isArray(prev.assignedRTs)
+        ? [...prev.assignedRTs].sort().join(',')
+        : '';
+      const prevKoor = (prev.koordinatorEmail || '').toLowerCase();
+      const nextKoor =
+        row.koordinatorEmail ||
+        (actorRole === 'koordinator' ? prevKoor || actorLower : '');
+
+      const isSame =
+        prev.name === row.name &&
+        prev.role === effectiveRole &&
+        Boolean(prev.active) === effectiveActive &&
+        prevRts === nextSortedRts &&
+        prevKoor === nextKoor;
+
+      if (isSame) {
+        unchanged++;
+        continue;
+      }
+
+      const payload: Record<string, any> = {
+        email: emailLower,
+        name: row.name,
+        role: effectiveRole,
+        assignedRTs: effectiveRts,
+        active: effectiveActive,
+        createdBy: prev.createdBy || actorLower,
+        createdAt: prev.createdAt || serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (nextKoor) payload.koordinatorEmail = nextKoor;
+
+      ops.push({ kind: 'set', email: emailLower, payload });
+      updated++;
+    } else {
+      const nextKoor =
+        row.koordinatorEmail || (actorRole === 'koordinator' ? actorLower : '');
+      const payload: Record<string, any> = {
+        email: emailLower,
+        name: row.name,
+        role: effectiveRole,
+        assignedRTs: effectiveRts,
+        active: effectiveActive,
+        createdBy: actorLower,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (nextKoor) payload.koordinatorEmail = nextKoor;
+
+      ops.push({ kind: 'set', email: emailLower, payload });
+      created++;
+    }
+  }
+
+  if (actorRole === 'admin' && replaceRemoved) {
+    for (const [existingEmail] of existingMap) {
+      if (
+        existingEmail !== BOOTSTRAP_ADMIN_EMAIL &&
+        !targetEmailSet.has(existingEmail)
+      ) {
+        ops.push({ kind: 'delete', email: existingEmail });
+        removed++;
+      }
+    }
+  }
+
+  for (let i = 0; i < ops.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const op of ops.slice(i, i + 400)) {
+      const ref = doc(db, 'staff_members', op.email);
+      if (op.kind === 'set') {
+        batch.set(ref, op.payload);
+      } else {
+        batch.delete(ref);
+      }
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'staff_members');
+    }
+  }
+
+  return {
+    created,
+    updated,
+    removed,
+    unchanged,
+    totalSheetRows: scopedRows.length,
+    errors,
+    emptySheet: false,
+  };
 }

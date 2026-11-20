@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   Lock,
   RefreshCw,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { DUSUN_LIST } from '../data/instrumentSpec';
@@ -25,11 +26,13 @@ import {
 import {
   importHouseholdsCsvBatch,
   markHouseholdSheetSynced,
+  resetAllCensusData,
   saveSpreadsheetConfig,
   saveWilayahConfig,
 } from '../services/firestoreService';
 import {
   APPS_SCRIPT_TEMPLATE,
+  clearAllDataViaWebhook,
   isValidAppsScriptUrl,
   syncAllDataViaWebhook,
 } from '../services/googleSheetsService';
@@ -52,6 +55,8 @@ interface AdminSettingsAndExportViewProps {
   piiRecords: HouseholdPiiRecord[];
   visits: VisitRecord[];
   revisionLogs: RevisionLogRecord[];
+  isOnline: boolean;
+  onAfterReset?: (message: string) => void;
 }
 
 export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProps> = ({
@@ -62,8 +67,10 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
   piiRecords,
   visits,
   revisionLogs,
+  isOnline,
+  onAfterReset,
 }) => {
-  const [subTab, setSubTab] = useState<'sheets' | 'ekspor' | 'impor' | 'wilayah'>('sheets');
+  const [subTab, setSubTab] = useState<'sheets' | 'ekspor' | 'impor' | 'wilayah' | 'reset'>('sheets');
 
   // Wilayah State
   const [rwMappings, setRwMappings] = useState<RwMapping[]>(wilayah.rwMappings);
@@ -95,6 +102,14 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
   const [sheetsMsg, setSheetsMsg] = useState<string | null>(null);
   const [sheetsErr, setSheetsErr] = useState<string | null>(null);
   const [confirmSyncAll, setConfirmSyncAll] = useState(false);
+
+  // Reset All Data State
+  const [confirmResetModal, setConfirmResetModal] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetProgress, setResetProgress] = useState<string | null>(null);
+  const [resetResultMsg, setResetResultMsg] = useState<string | null>(null);
+  const [resetErrMsg, setResetErrMsg] = useState<string | null>(null);
 
   const handleCopyScript = async () => {
     try {
@@ -227,6 +242,54 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
     }
   };
 
+  const handleConfirmResetAll = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline) {
+      setResetErrMsg('Perangkat sedang luring. Hubungkan internet terlebih dahulu.');
+      return;
+    }
+    if (resetConfirmText.trim().toUpperCase() !== 'RESET') {
+      setResetErrMsg('Ketik kata RESET dengan benar untuk mengonfirmasi penghapusan.');
+      return;
+    }
+
+    setResetBusy(true);
+    setResetErrMsg(null);
+    setResetResultMsg(null);
+    try {
+      const { deletedCount } = await resetAllCensusData((msg) => setResetProgress(msg));
+
+      let sheetCleared = false;
+      if (spreadsheetConfig?.webhookUrl) {
+        setResetProgress('Mengosongkan data di 5 tab Google Spreadsheet...');
+        await clearAllDataViaWebhook(spreadsheetConfig.webhookUrl);
+        await saveSpreadsheetConfig({
+          spreadsheetId: spreadsheetConfig.spreadsheetId,
+          spreadsheetUrl: spreadsheetConfig.spreadsheetUrl,
+          webhookUrl: spreadsheetConfig.webhookUrl,
+          title: spreadsheetConfig.title,
+          lastSyncedAt: new Date().toISOString(),
+          updatedBy: adminEmail,
+        });
+        sheetCleared = true;
+      }
+
+      const finalMsg = sheetCleared
+        ? `Berhasil menghapus ${deletedCount} dokumen sensus dari aplikasi serta mengosongkan seluruh data di Google Spreadsheet. Aplikasi siap dimulai kembali dari nol.`
+        : `Berhasil menghapus ${deletedCount} dokumen sensus dari aplikasi. Aplikasi siap dimulai kembali dari nol.`;
+
+      setConfirmResetModal(false);
+      setResetConfirmText('');
+      setResetResultMsg(finalMsg);
+      onAfterReset?.(finalMsg);
+    } catch (err: any) {
+      setResetErrMsg(err?.message || 'Gagal menghapus seluruh data sensus.');
+    } finally {
+      setResetBusy(false);
+      setResetProgress(null);
+    }
+  };
+
   const pendingSyncCount = households.filter((h) => h.submittedAt && !h.sheetSynced).length;
 
   return (
@@ -238,6 +301,7 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
             ['ekspor', 'Ekspor Data (CSV & GeoJSON)'],
             ['impor', 'Impor Daftar Induk CSV'],
             ['wilayah', 'Pemetaan Wilayah (19 RW / 85 RT)'],
+            ['reset', 'Reset Data (Mulai dari Nol)'],
           ] as const
         ).map(([id, lbl]) => (
           <button
@@ -246,7 +310,11 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
             onClick={() => setSubTab(id)}
             className={`min-h-[42px] rounded-xl px-4 py-2 text-xs font-bold transition ${
               subTab === id
-                ? 'bg-slate-900 text-white'
+                ? id === 'reset'
+                  ? 'bg-rose-700 text-white'
+                  : 'bg-slate-900 text-white'
+                : id === 'reset'
+                ? 'bg-rose-50 text-rose-800 hover:bg-rose-100'
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
@@ -390,7 +458,7 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
             <div className="rounded-xl border border-slate-200 p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-extrabold text-slate-950">
-                  Cara Pasang di Google Sheets (1 Menit, Tanpa Google Cloud)
+                  Cara Pasang / Perbarui Kode di Google Sheets (1 Menit, Tanpa Google Cloud)
                 </h3>
                 <button
                   type="button"
@@ -403,11 +471,13 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
               </div>
               <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-700">
                 <li>
-                  Buat Google Spreadsheet baru, lalu klik menu <strong>Ekstensi → Apps Script</strong>.
+                  Buka Google Spreadsheet desa, lalu klik menu <strong>Ekstensi → Apps Script</strong>.
                 </li>
                 <li>
-                  Hapus isi editor, tempel kode di bawah ini, lalu klik{' '}
-                  <strong>Terapkan (Deploy) → Deployment baru</strong>.
+                  Hapus isi editor, tempel kode terbaru di bawah ini (mendukung sinkronisasi data
+                  sensus &amp; baca/tulis daftar <code>petugas</code>), lalu klik{' '}
+                  <strong>Terapkan (Deploy) → Deployment baru</strong> (atau Kelola deployment →
+                  Edit → Versi baru).
                 </li>
                 <li>
                   Pilih jenis <strong>Aplikasi web</strong>, atur <em>Yang memiliki akses</em> menjadi{' '}
@@ -697,6 +767,179 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* TAB 5: RESET DATA (MULAI DARI NOL) */}
+      {subTab === 'reset' && (
+        <div className="rounded-2xl border border-rose-300 bg-white p-5 shadow-sm space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-700">
+              <Trash2 className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-extrabold text-rose-950">
+                Hapus Semua Data Sensus (Mulai dari Nol)
+              </h2>
+              <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                Fitur khusus Admin untuk menghapus seluruh data uji coba atau data sensus yang sudah
+                terinput di aplikasi web dan secara otomatis ikut mengosongkan data di Google
+                Spreadsheet.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+              <p className="text-[11px] font-bold text-slate-500 uppercase">Rumah Tangga</p>
+              <p className="mt-1 font-mono text-2xl font-extrabold text-slate-950 tabular-nums">
+                {households.length}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+              <p className="text-[11px] font-bold text-slate-500 uppercase">Riwayat Kunjungan</p>
+              <p className="mt-1 font-mono text-2xl font-extrabold text-slate-950 tabular-nums">
+                {visits.length}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+              <p className="text-[11px] font-bold text-slate-500 uppercase">Log Revisi</p>
+              <p className="mt-1 font-mono text-2xl font-extrabold text-slate-950 tabular-nums">
+                {revisionLogs.length}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-4 text-xs text-rose-950 space-y-1.5">
+              <p className="font-extrabold">Yang Akan Dihapus Permanen:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>Seluruh daftar &amp; isian Rumah Tangga, Identitas (NIK/KK), dan Foto Rumah.</li>
+                <li>Seluruh riwayat kunjungan, log revisi, serta penghitung nomor urut RT (kembali dari 001).</li>
+                <li>Seluruh draf &amp; antrean luring di perangkat ini.</li>
+                <li>
+                  {spreadsheetConfig?.webhookUrl
+                    ? `Seluruh baris data di 5 tab Google Spreadsheet "${spreadsheetConfig.title}" (header kolom tetap dipertahankan).`
+                    : 'Google Spreadsheet belum ditautkan (hanya data web yang dihapus).'}
+                </li>
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 text-xs text-emerald-950 space-y-1.5">
+              <p className="font-extrabold">Yang Tetap Dipertahankan:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>Akun Admin, Koordinator, Enumerator, dan penugasan RT petugas.</li>
+                <li>Pemetaan Wilayah 19 RW / 85 RT Desa Cibiru Wetan.</li>
+                <li>Tautan dan pengaturan Web App Google Spreadsheet.</li>
+              </ul>
+            </div>
+          </div>
+
+          {!isOnline && (
+            <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>
+                Perangkat sedang luring. Penghapusan massal wajib dilakukan saat terhubung internet
+                agar server dan Google Spreadsheet bersih bersamaan.
+              </span>
+            </div>
+          )}
+
+          {resetResultMsg && (
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 p-3.5 text-xs font-bold text-emerald-900">
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+              <span>{resetResultMsg}</span>
+            </div>
+          )}
+
+          {resetErrMsg && (
+            <div className="flex items-center gap-2 rounded-xl border border-rose-300 bg-rose-50 p-3.5 text-xs font-bold text-rose-900">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>{resetErrMsg}</span>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-rose-200 pt-4">
+            <p className="text-xs text-slate-600">
+              Disarankan ekspor CSV terlebih dahulu di tab <strong>Ekspor Data</strong> bila masih
+              membutuhkan salinan arsip.
+            </p>
+            <button
+              type="button"
+              disabled={!isOnline || resetBusy}
+              onClick={() => {
+                setResetConfirmText('');
+                setResetErrMsg(null);
+                setConfirmResetModal(true);
+              }}
+              className="inline-flex min-h-[46px] items-center gap-2 rounded-xl bg-rose-700 px-5 py-2.5 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              <span>Hapus Semua Data &amp; Kosongkan Spreadsheet</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Reset All Census Data */}
+      {confirmResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <form
+            onSubmit={handleConfirmResetAll}
+            className="w-full max-w-md rounded-2xl border border-rose-300 bg-white p-6 shadow-xl space-y-4"
+          >
+            <div className="flex items-center gap-2 text-rose-700">
+              <AlertTriangle className="h-5 w-5 shrink-0" />
+              <h3 className="text-lg font-extrabold">Konfirmasi Hapus Semua Data</h3>
+            </div>
+            <p className="text-sm leading-relaxed text-slate-700">
+              Tindakan ini akan menghapus permanen{' '}
+              <strong>{households.length} data rumah tangga</strong> beserta foto, NIK/KK, kunjungan,
+              log revisi, nomor urut RT,{' '}
+              {spreadsheetConfig?.webhookUrl
+                ? 'serta mengosongkan seluruh data di Google Spreadsheet.'
+                : 'di database aplikasi.'}
+            </p>
+            <div>
+              <label className="block text-xs font-bold text-slate-800">
+                Ketik <span className="font-mono text-rose-700">RESET</span> untuk melanjutkan:
+              </label>
+              <input
+                type="text"
+                autoFocus
+                required
+                value={resetConfirmText}
+                onChange={(e) => setResetConfirmText(e.target.value)}
+                placeholder="RESET"
+                className="mt-1.5 min-h-[44px] w-full rounded-xl border border-slate-300 px-3 font-mono text-sm font-bold uppercase text-slate-900"
+              />
+            </div>
+
+            {resetProgress && (
+              <p className="text-xs font-semibold text-emerald-800">{resetProgress}</p>
+            )}
+            {resetErrMsg && (
+              <p className="text-xs font-semibold text-rose-700">{resetErrMsg}</p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={resetBusy}
+                onClick={() => setConfirmResetModal(false)}
+                className="min-h-[44px] rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-800"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={resetBusy || resetConfirmText.trim().toUpperCase() !== 'RESET'}
+                className="min-h-[44px] rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {resetBusy ? 'Menghapus...' : 'Ya, Hapus & Mulai dari Nol'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

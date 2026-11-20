@@ -587,3 +587,84 @@ export function applyOfflineQueueOverlay(params: {
 
   return { households, piiRecords, visits, pendingSyncIds };
 }
+
+export async function clearAllCensusLocalData(): Promise<void> {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (
+          key.startsWith('cbw_census_draft_v1_') ||
+          key.startsWith(QUEUE_PREFIX) ||
+          key.startsWith('cbw_photo_fallback_') ||
+          (key.startsWith(CACHE_PREFIX) &&
+            (key.endsWith('_households') ||
+              key.endsWith('_piiRecords') ||
+              key.endsWith('_visits') ||
+              key.endsWith('_revisionLogs')))
+        ) {
+          keysToRemove.push(key);
+        }
+      }
+      for (const k of keysToRemove) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const db = await openMediaDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(MEDIA_STORE_NAME, 'readwrite');
+      tx.objectStore(MEDIA_STORE_NAME).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    // ignore
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cbw-offline-queue-changed'));
+  }
+}
+
+export async function removeHouseholdLocalData(id_rt: string): Promise<void> {
+  await deleteOfflinePhoto(id_rt);
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(`cbw_census_draft_v1_${id_rt}`);
+
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith(QUEUE_PREFIX)) continue;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try {
+          const items = JSON.parse(raw) as OfflineQueueItem[];
+          const filtered = items.filter((q) => {
+            if (q.type === 'create_listing') return q.tempId !== id_rt;
+            return q.id_rt !== id_rt;
+          });
+          if (filtered.length !== items.length) {
+            localStorage.setItem(key, JSON.stringify(filtered));
+          }
+        } catch {
+          // ignore malformed queue
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cbw-offline-queue-changed'));
+  }
+}

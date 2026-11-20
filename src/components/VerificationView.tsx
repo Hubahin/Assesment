@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, Eye, History, RotateCcw, X } from 'lucide-react';
+import { CheckCircle2, Eye, History, RotateCcw, Trash2, X } from 'lucide-react';
 import { STATUS_CACAH_META } from '../data/instrumentSpec';
 import { verifyHouseholdSubmission } from '../services/firestoreService';
 import {
@@ -16,6 +16,7 @@ interface VerificationViewProps {
   piiRecords: HouseholdPiiRecord[];
   revisionLogs: RevisionLogRecord[];
   onEditHousehold: (h: HouseholdRecord) => void;
+  onAdminDeleteHousehold?: (h: HouseholdRecord) => Promise<void>;
 }
 
 export const VerificationView: React.FC<VerificationViewProps> = ({
@@ -24,6 +25,7 @@ export const VerificationView: React.FC<VerificationViewProps> = ({
   piiRecords,
   revisionLogs,
   onEditHousehold,
+  onAdminDeleteHousehold,
 }) => {
   const isAdmin = profile.role === 'admin';
   const [filterVerif, setFilterVerif] = useState<'semua' | 'belum' | 'dikembalikan' | 'terverifikasi'>('belum');
@@ -31,6 +33,8 @@ export const VerificationView: React.FC<VerificationViewProps> = ({
   const [catatan, setCatatan] = useState('');
   const [saving, setSaving] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<HouseholdRecord | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const submittedHouseholds = useMemo(() => {
     return households.filter((h) => {
@@ -149,7 +153,7 @@ export const VerificationView: React.FC<VerificationViewProps> = ({
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => onEditHousehold(h)}
@@ -169,10 +173,70 @@ export const VerificationView: React.FC<VerificationViewProps> = ({
                     <Eye className="h-4 w-4" />
                     Periksa &amp; Verifikasi
                   </button>
+                  {isAdmin && onAdminDeleteHousehold && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setErrMsg(null);
+                        setDeleteTarget(h);
+                      }}
+                      title="Hapus permanen data ini dari web & Spreadsheet"
+                      className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800 hover:bg-rose-100"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      Hapus
+                    </button>
+                  )}
                 </div>
               </div>
             );
           })}
+        </div>
+      )}
+
+      {deleteTarget && onAdminDeleteHousehold && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-300 bg-white p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 text-rose-700">
+              <Trash2 className="h-5 w-5 shrink-0" />
+              <h3 className="text-lg font-extrabold">Hapus Data Rumah Tangga?</h3>
+            </div>
+            <p className="text-sm leading-relaxed text-slate-700">
+              Data <span className="font-mono font-bold">{deleteTarget.id_rt}</span> (
+              <strong>{deleteTarget.modulA?.nama_kk || deleteTarget.nama_kk_daftar}</strong>) akan
+              dihapus permanen dari aplikasi web &amp; Google Spreadsheet.
+            </p>
+            {errMsg && <p className="text-xs font-semibold text-rose-700">{errMsg}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+                className="min-h-[44px] rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-800"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  setErrMsg(null);
+                  try {
+                    await onAdminDeleteHousehold(deleteTarget);
+                    setDeleteTarget(null);
+                  } catch (e: any) {
+                    setErrMsg(e?.message || 'Gagal menghapus data.');
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+                className="min-h-[44px] rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:opacity-50"
+              >
+                {deleting ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

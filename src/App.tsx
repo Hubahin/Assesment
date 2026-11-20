@@ -28,8 +28,10 @@ import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { googleSignIn, initAuth, logout, testConnection } from './lib/firebase';
 import {
   BOOTSTRAP_ADMIN_EMAIL,
+  deleteSingleHouseholdRecord,
   ensureBootstrapSetup,
   flushOfflineSyncQueue,
+  saveSpreadsheetConfig,
   subscribeHouseholdPii,
   subscribeHouseholds,
   subscribeMyStaffProfile,
@@ -38,7 +40,9 @@ import {
   subscribeStaffList,
   subscribeVisits,
   subscribeWilayahConfig,
+  syncStaffMembersFromSpreadsheet,
 } from './services/firestoreService';
+import { syncAllDataViaWebhook } from './services/googleSheetsService';
 import {
   applyOfflineQueueOverlay,
   clearOfflineSession,
@@ -131,6 +135,8 @@ export default function App() {
 
   const isSyncingRef = useRef(false);
   const syncedSheetIdsInSessionRef = useRef<Set<string>>(new Set());
+  const lastAutoStaffSyncAtRef = useRef<number>(0);
+  const isStaffSyncingRef = useRef<boolean>(false);
 
   const activeEmail = useMemo(() => {
     return (user?.email || offlineSession?.email || '').toLowerCase();
@@ -439,6 +445,54 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [isOnline, user, profile, offlineQueue.length, spreadsheetConfig?.webhookUrl, households, runSyncNow]);
 
+  // Auto-pull daftar petugas dari tab "petugas" Google Spreadsheet saat Admin online / kembali ke aplikasi
+  useEffect(() => {
+    const webhookUrl = spreadsheetConfig?.webhookUrl;
+    if (!isOnline || !user || !profile || !profile.active || !webhookUrl) return;
+    if (profile.role !== 'admin') return;
+
+    const runAutoStaffSync = async () => {
+      const now = Date.now();
+      if (isStaffSyncingRef.current || now - lastAutoStaffSyncAtRef.current < 25000) return;
+      isStaffSyncingRef.current = true;
+      lastAutoStaffSyncAtRef.current = now;
+      try {
+        const res = await syncStaffMembersFromSpreadsheet({
+          webhookUrl,
+          wilayah,
+          actorEmail: profile.email,
+          actorRole: profile.role,
+          replaceRemoved: true,
+        });
+        const totalChanges = res.created + res.updated + res.removed;
+        if (!res.emptySheet && totalChanges > 0) {
+          setToastMessage(
+            `Daftar petugas otomatis disinkronkan dari Spreadsheet (${res.created} baru, ${res.updated} diperbarui, ${res.removed} dihapus).`
+          );
+        }
+      } catch {
+        // Diamkan jika Apps Script versi lama belum mendukung doGet; info lengkap ada di menu Petugas
+      } finally {
+        isStaffSyncingRef.current = false;
+      }
+    };
+
+    const timer = setTimeout(runAutoStaffSync, 1200);
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') {
+        runAutoStaffSync();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [isOnline, user, profile, spreadsheetConfig?.webhookUrl, wilayah]);
+
   const allowedTabs = useMemo(() => {
     if (!profile) return [];
     return NAV_TABS.filter((t) => t.roles.includes(profile.role));
@@ -492,6 +546,55 @@ export default function App() {
     setStaffList([]);
     setProfile(null);
     await logout();
+  };
+
+  const handleAdminDeleteHousehold = async (target: HouseholdRecord) => {
+    if (!profile || profile.role !== 'admin') return;
+    await deleteSingleHouseholdRecord(target.id_rt);
+    syncedSheetIdsInSessionRef.current.delete(target.id_rt);
+    if (activeHouseholdId === target.id_rt) {
+      setActiveHouseholdId(null);
+    }
+
+    if (isOnline && spreadsheetConfig?.webhookUrl) {
+      const remainingHouseholds = effectiveHouseholds.filter((x) => x.id_rt !== target.id_rt);
+      const remainingPii = effectivePii.filter((x) => x.id_rt !== target.id_rt);
+      const remainingVisits = effectiveVisits.filter((x) => x.id_rt !== target.id_rt);
+      const remainingLogs = revisionLogs.filter((x) => x.id_rt !== target.id_rt);
+
+      await syncAllDataViaWebhook({
+        webhookUrl: spreadsheetConfig.webhookUrl,
+        households: remainingHouseholds,
+        piiRecords: remainingPii,
+        visits: remainingVisits,
+        revisionLogs: remainingLogs,
+      });
+      await saveSpreadsheetConfig({
+        spreadsheetId: spreadsheetConfig.spreadsheetId,
+        spreadsheetUrl: spreadsheetConfig.spreadsheetUrl,
+        webhookUrl: spreadsheetConfig.webhookUrl,
+        title: spreadsheetConfig.title,
+        lastSyncedAt: new Date().toISOString(),
+        updatedBy: profile.email,
+      });
+    }
+
+    setToastMessage(
+      spreadsheetConfig?.webhookUrl
+        ? `Data ${target.id_rt} berhasil dihapus dari aplikasi & Google Spreadsheet.`
+        : `Data ${target.id_rt} berhasil dihapus dari aplikasi.`
+    );
+  };
+
+  const handleAfterReset = (msg: string) => {
+    syncedSheetIdsInSessionRef.current.clear();
+    setActiveHouseholdId(null);
+    setOfflineQueue([]);
+    setHouseholds([]);
+    setPiiRecords([]);
+    setVisits([]);
+    setRevisionLogs([]);
+    setToastMessage(msg);
   };
 
   const isOfflineFallbackAuth = !user && Boolean(offlineSession && profile && profile.active);
@@ -696,6 +799,9 @@ export default function App() {
                 hasFirebaseUser={Boolean(user)}
                 pendingSyncIds={pendingSyncIds}
                 onOpenQuestionnaire={(h) => setActiveHouseholdId(h.id_rt)}
+                onAdminDeleteHousehold={
+                  profile.role === 'admin' && isOnline ? handleAdminDeleteHousehold : undefined
+                }
               />
             )}
 
@@ -706,6 +812,7 @@ export default function App() {
                 piiRecords={effectivePii}
                 revisionLogs={revisionLogs}
                 onEditHousehold={(h) => setActiveHouseholdId(h.id_rt)}
+                onAdminDeleteHousehold={isOnline ? handleAdminDeleteHousehold : undefined}
               />
             )}
 
@@ -732,6 +839,11 @@ export default function App() {
                   profile={profile}
                   wilayah={wilayah}
                   staffList={staffList}
+                  spreadsheetConfig={spreadsheetConfig}
+                  isOnline={isOnline}
+                  onStaffSyncedToSheet={() => {
+                    lastAutoStaffSyncAtRef.current = Date.now();
+                  }}
                 />
               )}
 
@@ -744,6 +856,8 @@ export default function App() {
                 piiRecords={effectivePii}
                 visits={effectiveVisits}
                 revisionLogs={revisionLogs}
+                isOnline={isOnline}
+                onAfterReset={handleAfterReset}
               />
             )}
           </>

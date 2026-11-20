@@ -178,8 +178,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   Email <span className="font-mono font-semibold">{unregisteredEmail}</span>{' '}
                   {inactiveMessage
                     ? 'saat ini berstatus nonaktif.'
-                    : 'belum didaftarkan oleh Admin atau Koordinator Enumerator.'}{' '}
-                  Pengguna yang belum terdaftar tidak dapat melihat data apa pun.
+                    : 'belum terdaftar di sistem.'}{' '}
+                  Jika email Anda baru ditambahkan atau diubah di Google Spreadsheet tab{' '}
+                  <code className="font-mono font-semibold">petugas</code>, minta Admin membuka
+                  aplikasi atau menekan <strong>Tarik &amp; Sinkron dari Spreadsheet</strong> di menu
+                  Petugas terlebih dahulu.
                 </p>
               </div>
             </div>
