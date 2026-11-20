@@ -66,6 +66,9 @@ async function postWebhookPayload(webhookUrl: string, payload: unknown): Promise
   if (!isValidAppsScriptUrl(webhookUrl)) {
     throw new Error('URL Google Apps Script Web App tidak valid (harus berakhiran /exec).');
   }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new Error('Perangkat sedang luring. Sinkronisasi Spreadsheet ditunda hingga online.');
+  }
 
   // Gunakan text/plain + no-cors agar terhindar dari preflight CORS & redirect 302 script.googleusercontent.com
   await fetch(webhookUrl.trim(), {

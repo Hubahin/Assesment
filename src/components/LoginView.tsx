@@ -1,33 +1,99 @@
-import React, { useState } from 'react';
-import { ClipboardCheck, ExternalLink, LogOut, ShieldAlert, WifiOff } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  CheckCircle2,
+  ClipboardCheck,
+  ExternalLink,
+  LogOut,
+  ShieldAlert,
+  UserCheck,
+  WifiOff,
+  X,
+} from 'lucide-react';
 import { User } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { DEFAULT_RW_MAPPINGS_85 } from '../data/instrumentSpec';
+import { KnownAccountRecord, removeKnownAccount } from '../services/offlineStore';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface LoginViewProps {
   user: User | null;
   unregisteredEmail?: string | null;
   inactiveMessage?: boolean;
+  knownAccounts: KnownAccountRecord[];
+  bootstrapAdminEmail: string;
   onSignIn: () => Promise<void>;
+  onOfflineSignIn: (params: {
+    email: string;
+    name?: string;
+    selectedRTs?: string[];
+  }) => void;
   onSignOut: () => Promise<void>;
+  onKnownAccountsChanged: () => void;
   isOnline: boolean;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Admin',
+  koordinator: 'Koordinator',
+  enumerator: 'Enumerator',
+};
 
 export const LoginView: React.FC<LoginViewProps> = ({
   user,
   unregisteredEmail,
   inactiveMessage,
+  knownAccounts,
+  bootstrapAdminEmail,
   onSignIn,
+  onOfflineSignIn,
   onSignOut,
+  onKnownAccountsChanged,
   isOnline,
 }) => {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [unauthorizedHost, setUnauthorizedHost] = useState<string | null>(null);
 
+  const [showOfflineForm, setShowOfflineForm] = useState(!isOnline && knownAccounts.length === 0);
+  const [offlineEmail, setOfflineEmail] = useState('');
+  const [offlineName, setOfflineName] = useState('');
+  const [selectedOfflineRt, setSelectedOfflineRt] = useState('D1-01-01');
+  const [offlineFormErr, setOfflineFormErr] = useState<string | null>(null);
+
+  const allRtOptions = useMemo(() => {
+    const list: { rtKey: string; label: string }[] = [];
+    for (const m of DEFAULT_RW_MAPPINGS_85) {
+      for (let i = 1; i <= m.jumlahRt; i++) {
+        const rt = String(i).padStart(2, '0');
+        const rtKey = `${m.dusun}-${m.rw}-${rt}`;
+        list.push({ rtKey, label: `${m.dusun} · RW ${m.rw} · RT ${rt}` });
+      }
+    }
+    return list;
+  }, []);
+
+  const matchedKnownAccount = useMemo(() => {
+    const clean = offlineEmail.trim().toLowerCase();
+    if (!clean) return null;
+    return knownAccounts.find((a) => a.email.toLowerCase() === clean) || null;
+  }, [offlineEmail, knownAccounts]);
+
+  const isBootstrapOfflineEmail =
+    offlineEmail.trim().toLowerCase() === bootstrapAdminEmail.toLowerCase();
+
   const handleLogin = async () => {
     setErrorMsg(null);
     setUnauthorizedHost(null);
+
+    if (!isOnline) {
+      if (knownAccounts.length === 1) {
+        onOfflineSignIn({ email: knownAccounts[0].email });
+        return;
+      }
+      setShowOfflineForm(true);
+      return;
+    }
+
     setLoading(true);
     try {
       await onSignIn();
@@ -43,13 +109,31 @@ export const LoginView: React.FC<LoginViewProps> = ({
       } else if (code === 'auth/popup-closed-by-user') {
         setErrorMsg('Proses masuk dibatalkan sebelum selesai.');
       } else if (code === 'auth/network-request-failed') {
-        setErrorMsg('Koneksi internet terputus saat menghubungi layanan masuk Google.');
+        setShowOfflineForm(true);
+        setErrorMsg(
+          'Tidak dapat menghubungi server Google karena jaringan terputus. Silakan masuk melalui Mode Luring di bawah ini.'
+        );
       } else {
         setErrorMsg(err?.message || 'Gagal masuk dengan akun Google. Silakan coba lagi.');
       }
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleOfflineSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setOfflineFormErr(null);
+    const cleanEmail = offlineEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setOfflineFormErr('Masukkan alamat email Google yang valid (contoh: nama@gmail.com).');
+      return;
+    }
+    onOfflineSignIn({
+      email: cleanEmail,
+      name: offlineName.trim() || undefined,
+      selectedRTs: [selectedOfflineRt],
+    });
   };
 
   return (
@@ -72,15 +156,19 @@ export const LoginView: React.FC<LoginViewProps> = ({
           Sensus Rumah Tangga 2026
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-slate-600">
-          Aplikasi pendataan lapangan resmi I&apos;ComDev Institute untuk enumerator, koordinator
-          enumerator, dan admin desa. Mendukung pengisian luring (offline) dan sinkronisasi otomatis
-          ke Google Spreadsheet.
+          Aplikasi pendataan lapangan resmi I&apos;ComDev Institute. Mendukung masuk &amp; pengisian
+          formulir secara luring (offline) serta sinkronisasi otomatis ke Google Spreadsheet saat
+          online.
         </p>
 
         {!isOnline && (
-          <div className="mt-4 flex items-center gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-3 text-xs font-medium text-amber-900">
-            <WifiOff className="h-4 w-4 shrink-0" />
-            <span>Perangkat sedang luring. Masuk akun Google memerlukan koneksi internet awal.</span>
+          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-3 text-xs font-medium text-amber-950">
+            <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Perangkat sedang <strong>Luring (Offline)</strong>. Anda tetap bisa masuk menggunakan
+              akun Google tersimpan atau memasukkan email Google Anda untuk mengisi data secara
+              lokal.
+            </span>
           </div>
         )}
 
@@ -112,6 +200,62 @@ export const LoginView: React.FC<LoginViewProps> = ({
           </div>
         ) : (
           <div className="mt-6 space-y-4">
+            {/* Saved Google Accounts for Instant 1-Tap Offline Login */}
+            {knownAccounts.length > 0 && !isOnline && (
+              <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5">
+                <p className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-950">
+                  <UserCheck className="h-4 w-4 text-emerald-800" />
+                  Akun Google Tersimpan di Perangkat
+                </p>
+                <div className="space-y-2">
+                  {knownAccounts.map((acc) => (
+                    <div
+                      key={acc.email}
+                      className="flex items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-white p-2.5"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onOfflineSignIn({ email: acc.email })}
+                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                      >
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-900 text-xs font-extrabold text-white">
+                          {(acc.displayName || acc.email).slice(0, 2).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-extrabold text-slate-950">
+                            {acc.displayName || acc.profile.name}
+                          </p>
+                          <p className="truncate font-mono text-[11px] text-slate-600">
+                            {acc.email} · {ROLE_LABELS[acc.profile.role] || acc.profile.role}
+                          </p>
+                        </div>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onOfflineSignIn({ email: acc.email })}
+                          className="min-h-[36px] rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-900"
+                        >
+                          Masuk
+                        </button>
+                        <button
+                          type="button"
+                          title="Hapus akun tersimpan dari perangkat"
+                          onClick={() => {
+                            removeKnownAccount(acc.email);
+                            onKnownAccountsChanged();
+                          }}
+                          className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               type="button"
               disabled={loading}
@@ -146,10 +290,110 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   </svg>
                 </div>
                 <span className="gsi-material-button-contents">
-                  {loading ? 'Menghubungkan...' : 'Masuk dengan Google'}
+                  {loading
+                    ? 'Menghubungkan...'
+                    : !isOnline && knownAccounts.length === 1
+                    ? `Masuk Luring (${knownAccounts[0].email})`
+                    : !isOnline
+                    ? 'Masuk dengan Email Google (Mode Luring)'
+                    : 'Masuk dengan Google'}
                 </span>
               </div>
             </button>
+
+            {(!isOnline || showOfflineForm) && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-extrabold text-slate-900">
+                    Masuk Mode Luring dengan Email Google
+                  </p>
+                  {!showOfflineForm && (
+                    <button
+                      type="button"
+                      onClick={() => setShowOfflineForm(true)}
+                      className="text-xs font-bold text-emerald-800 underline"
+                    >
+                      Buka Form
+                    </button>
+                  )}
+                </div>
+
+                {showOfflineForm && (
+                  <form onSubmit={handleOfflineSubmit} className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700">
+                        Email Akun Google <span className="text-rose-600">*</span>
+                      </label>
+                      <input
+                        type="email"
+                        required
+                        value={offlineEmail}
+                        onChange={(e) => setOfflineEmail(e.target.value)}
+                        placeholder="contoh: arisriswanto058@gmail.com"
+                        className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900"
+                      />
+                    </div>
+
+                    {(matchedKnownAccount || isBootstrapOfflineEmail) ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-900">
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
+                        <span>
+                          Akun dikenali di perangkat — peran &amp; wilayah RT tugas otomatis
+                          dimuat.
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700">
+                            Nama Petugas
+                          </label>
+                          <input
+                            type="text"
+                            value={offlineName}
+                            onChange={(e) => setOfflineName(e.target.value)}
+                            placeholder="Nama lengkap enumerator"
+                            className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700">
+                            Pilih RT Tugas (Sementara Saat Luring)
+                          </label>
+                          <select
+                            value={selectedOfflineRt}
+                            onChange={(e) => setSelectedOfflineRt(e.target.value)}
+                            className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 font-mono text-xs font-bold text-slate-900"
+                          >
+                            {allRtOptions.map((o) => (
+                              <option key={o.rtKey} value={o.rtKey}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            Saat kembali online, login Google akan menyinkronkan data ini ke server
+                            &amp; Google Spreadsheet.
+                          </p>
+                        </div>
+                      </>
+                    )}
+
+                    {offlineFormErr && (
+                      <p className="text-xs font-semibold text-rose-700">{offlineFormErr}</p>
+                    )}
+
+                    <button
+                      type="submit"
+                      className="min-h-[44px] w-full rounded-xl bg-emerald-800 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-900"
+                    >
+                      Masuk &amp; Mulai Pendataan Luring
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
 
             {errorMsg && (
               <div className="space-y-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-900">

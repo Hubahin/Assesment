@@ -13,11 +13,15 @@ import {
 import { CHOICES, TEKS_PERSETUJUAN } from '../../data/instrumentSpec';
 import {
   getHouseholdPhoto,
+  isOfflineOrTimeoutError,
   loadLocalDraft,
   markHouseholdSheetSynced,
+  queueOfflineDraft,
+  queueOfflineSubmission,
   saveHouseholdDraftRemote,
   saveLocalDraft,
   submitHouseholdCensus,
+  withNetworkTimeout,
 } from '../../services/firestoreService';
 import { appendSubmissionViaWebhook } from '../../services/googleSheetsService';
 import {
@@ -58,6 +62,7 @@ interface QuestionnaireWizardProps {
   actorName: string;
   actorRole: UserRole;
   isOnline: boolean;
+  hasFirebaseUser: boolean;
   spreadsheetConfig: SpreadsheetConfig | null;
   onClose: () => void;
   onSubmittedMessage: (msg: string) => void;
@@ -70,6 +75,7 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
   actorName,
   actorRole,
   isOnline,
+  hasFirebaseUser,
   spreadsheetConfig,
   onClose,
   onSubmittedMessage,
@@ -136,13 +142,17 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
 
   const [draft, setDraft] = useState<CensusDraft>(initialDraft);
 
-  // Load existing photo from separate collection if present and not in local draft
+  // Load existing photo from IndexedDB or separate Firestore collection if not in local draft
   useEffect(() => {
     let active = true;
-    if (household.modul0?.has_foto_rumah && !draft.fotoDataUrl) {
+    if (!draft.fotoDataUrl) {
       getHouseholdPhoto(household.id_rt).then((url) => {
         if (active && url) {
-          setDraft((prev) => ({ ...prev, fotoDataUrl: url }));
+          setDraft((prev) => ({
+            ...prev,
+            fotoDataUrl: url,
+            modul0: { ...prev.modul0, has_foto_rumah: true },
+          }));
         }
       });
     }
@@ -236,12 +246,47 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
     }
   };
 
+  const canSendRemoteNow =
+    isOnline && hasFirebaseUser && !household.id_rt.startsWith('LOCAL-');
+
   const handleSaveDraftOnly = async () => {
     setSavingDraft(true);
     try {
       saveLocalDraft(draft);
-      await saveHouseholdDraftRemote(household, draft, actorEmail, actorName);
-      onSubmittedMessage(`Draf ${household.id_rt} tersimpan di perangkat & antrean sinkronisasi.`);
+      if (!canSendRemoteNow) {
+        await queueOfflineDraft({
+          existingHousehold: household,
+          draft,
+          actorEmail,
+          actorName,
+        });
+        onSubmittedMessage(
+          `Draf ${household.id_rt} tersimpan di penyimpanan lokal (Luring). Akan tersinkron otomatis saat online.`
+        );
+        return;
+      }
+
+      try {
+        await withNetworkTimeout(
+          saveHouseholdDraftRemote(household, draft, actorEmail, actorName),
+          6000
+        );
+        onSubmittedMessage(`Draf ${household.id_rt} tersimpan di perangkat & server.`);
+      } catch (err) {
+        if (isOfflineOrTimeoutError(err)) {
+          await queueOfflineDraft({
+            existingHousehold: household,
+            draft,
+            actorEmail,
+            actorName,
+          });
+          onSubmittedMessage(
+            `Koneksi lambat/terputus. Draf ${household.id_rt} disimpan lokal & masuk antrean sinkronisasi.`
+          );
+        } else {
+          throw err;
+        }
+      }
     } finally {
       setSavingDraft(false);
     }
@@ -255,18 +300,70 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
   const executeSubmit = async () => {
     setSubmitError(null);
     setSubmitting(true);
-    try {
-      const { updatedHousehold, visit, cleanedPii } = await submitHouseholdCensus({
-        existingHousehold: household,
-        draft,
-        actorEmail,
-        actorName,
-        actorRole,
-        revisionReason: isAlreadySubmitted ? revisionReason : undefined,
-      });
+    const visitId = `vis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+    try {
+      if (!canSendRemoteNow) {
+        await queueOfflineSubmission({
+          existingHousehold: household,
+          draft,
+          actorEmail,
+          actorName,
+          actorRole,
+          revisionReason: isAlreadySubmitted ? revisionReason : undefined,
+          visitId,
+          firestoreSynced: false,
+          sheetSynced: false,
+        });
+        setShowSubmitConfirm(false);
+        onSubmittedMessage(
+          `${household.id_rt} tersimpan di penyimpanan lokal (Luring). Data akan otomatis dikirim ke database${spreadsheetConfig?.webhookUrl ? ' & Google Spreadsheet' : ''} saat online.`
+        );
+        onClose();
+        return;
+      }
+
+      let submitResult: Awaited<ReturnType<typeof submitHouseholdCensus>>;
+      try {
+        submitResult = await withNetworkTimeout(
+          submitHouseholdCensus({
+            existingHousehold: household,
+            draft,
+            actorEmail,
+            actorName,
+            actorRole,
+            revisionReason: isAlreadySubmitted ? revisionReason : undefined,
+            visitId,
+          }),
+          18000
+        );
+      } catch (err) {
+        if (isOfflineOrTimeoutError(err)) {
+          await queueOfflineSubmission({
+            existingHousehold: household,
+            draft,
+            actorEmail,
+            actorName,
+            actorRole,
+            revisionReason: isAlreadySubmitted ? revisionReason : undefined,
+            visitId,
+            firestoreSynced: false,
+            sheetSynced: false,
+          });
+          setShowSubmitConfirm(false);
+          onSubmittedMessage(
+            `Jaringan tidak stabil. ${household.id_rt} disimpan di penyimpanan lokal & akan otomatis disinkronkan saat online.`
+          );
+          onClose();
+          return;
+        }
+        throw err;
+      }
+
+      const { updatedHousehold, visit, cleanedPii } = submitResult;
       let sheetMsg = 'Data tersimpan di database.';
-      if (isOnline && spreadsheetConfig?.webhookUrl) {
+
+      if (spreadsheetConfig?.webhookUrl) {
         try {
           await appendSubmissionViaWebhook({
             webhookUrl: spreadsheetConfig.webhookUrl,
@@ -282,10 +379,19 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
           await markHouseholdSheetSynced(updatedHousehold.id_rt);
           sheetMsg = 'Data tersimpan & langsung dikirim ke Google Spreadsheet.';
         } catch (sheetErr: any) {
-          sheetMsg = `Data tersimpan di Firestore (menunggu sinkron Spreadsheet: ${sheetErr?.message || 'gagal kirim'}).`;
+          await queueOfflineSubmission({
+            existingHousehold: household,
+            draft,
+            actorEmail,
+            actorName,
+            actorRole,
+            revisionReason: isAlreadySubmitted ? revisionReason : undefined,
+            visitId,
+            firestoreSynced: true,
+            sheetSynced: false,
+          });
+          sheetMsg = `Data tersimpan di Firestore & antre kirim Google Spreadsheet (${sheetErr?.message || 'menunggu jaringan'}).`;
         }
-      } else if (!isOnline) {
-        sheetMsg = 'Data tersimpan luring di perangkat dan akan tersinkron otomatis saat online.';
       }
 
       setShowSubmitConfirm(false);
@@ -700,11 +806,26 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
       {showSubmitConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
-            <h3 className="text-lg font-bold text-slate-950">Konfirmasi Pengiriman Data</h3>
+            <h3 className="text-lg font-bold text-slate-950">
+              {canSendRemoteNow ? 'Konfirmasi Pengiriman Data' : 'Simpan Data di Perangkat (Mode Luring)'}
+            </h3>
             <p className="mt-2 text-sm leading-relaxed text-slate-700">
-              Data rumah tangga <span className="font-mono font-bold">{household.id_rt}</span> akan
-              disimpan ke Cloud Firestore{spreadsheetConfig?.webhookUrl ? ' dan dikirim ke Google Spreadsheet' : ''}.
-              Pastikan seluruh jawaban sudah sesuai.
+              {canSendRemoteNow ? (
+                <>
+                  Data rumah tangga <span className="font-mono font-bold">{household.id_rt}</span> akan
+                  disimpan ke Cloud Firestore
+                  {spreadsheetConfig?.webhookUrl ? ' dan dikirim ke Google Spreadsheet' : ''}. Pastikan
+                  seluruh jawaban sudah sesuai.
+                </>
+              ) : (
+                <>
+                  Perangkat sedang luring. Data rumah tangga{' '}
+                  <span className="font-mono font-bold">{household.id_rt}</span> akan disimpan di
+                  penyimpanan lokal perangkat dan{' '}
+                  <strong>otomatis dikirim ke server{spreadsheetConfig?.webhookUrl ? ' & Google Spreadsheet' : ''}</strong>{' '}
+                  saat koneksi internet kembali aktif.
+                </>
+              )}
             </p>
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button

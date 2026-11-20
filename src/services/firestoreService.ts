@@ -32,19 +32,82 @@ import {
   WilayahConfig,
 } from '../types/census';
 import { cleanCensusData, computeJsonDiffs, stripUndefined } from '../utils/xlsformValidation';
+import { appendSubmissionViaWebhook } from './googleSheetsService';
+import {
+  deleteOfflinePhoto,
+  enqueueOfflineItem,
+  getOfflinePhoto,
+  loadOfflineQueue,
+  loadOfflineSession,
+  OfflineQueueItem,
+  remapTempIdInQueue,
+  removeOfflineQueueItem,
+  saveOfflinePhoto,
+  updateOfflineQueueItem,
+} from './offlineStore';
 
 export const BOOTSTRAP_ADMIN_EMAIL = 'arisriswanto057@gmail.com';
 
 const DRAFT_STORAGE_PREFIX = 'cbw_census_draft_v1_';
 
-export function saveLocalDraft(draft: CensusDraft): void {
+export async function withNetworkTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs = 10000
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    localStorage.setItem(
-      `${DRAFT_STORAGE_PREFIX}${draft.id_rt}`,
-      JSON.stringify({ ...draft, updatedLocallyAt: new Date().toISOString() })
-    );
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('NETWORK_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function isOfflineOrTimeoutError(err: unknown): boolean {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('network_timeout') ||
+    lower.includes('unavailable') ||
+    lower.includes('client is offline') ||
+    lower.includes('failed to fetch') ||
+    lower.includes('networkerror') ||
+    lower.includes('deadline-exceeded')
+  );
+}
+
+export function saveLocalDraft(draft: CensusDraft): void {
+  const payload = { ...draft, updatedLocallyAt: new Date().toISOString() };
+  try {
+    localStorage.setItem(`${DRAFT_STORAGE_PREFIX}${draft.id_rt}`, JSON.stringify(payload));
+    if (draft.fotoDataUrl) {
+      saveOfflinePhoto(draft.id_rt, draft.fotoDataUrl).catch(() => {});
+    }
   } catch (e) {
-    console.warn('Gagal menyimpan draf lokal (kuota penyimpanan penuh?):', e);
+    // Jika quota localStorage penuh karena foto, simpan foto ke IndexedDB lalu simpan teks draf tanpa foto
+    if (draft.fotoDataUrl) {
+      saveOfflinePhoto(draft.id_rt, draft.fotoDataUrl)
+        .then(() => {
+          try {
+            localStorage.setItem(
+              `${DRAFT_STORAGE_PREFIX}${draft.id_rt}`,
+              JSON.stringify({ ...payload, fotoDataUrl: null })
+            );
+          } catch {
+            // ignore
+          }
+        })
+        .catch(() => {
+          console.warn('Gagal menyimpan draf lokal:', e);
+        });
+    } else {
+      console.warn('Gagal menyimpan draf lokal (kuota penyimpanan penuh?):', e);
+    }
   }
 }
 
@@ -123,10 +186,26 @@ export function subscribeMyStaffProfile(
           createdBy: emailLower,
         });
       } else {
-        onData(null);
+        // Saat offline / berasal dari cache lokal yang belum lengkap, pertahankan profil tersimpan jika ada
+        const cachedSession = loadOfflineSession();
+        const isOfflineCache = snap.metadata.fromCache || (typeof navigator !== 'undefined' && !navigator.onLine);
+        if (isOfflineCache && cachedSession && cachedSession.email.toLowerCase() === emailLower) {
+          onData(cachedSession.profile);
+        } else {
+          onData(null);
+        }
       }
     },
-    (err) => handleFirestoreError(err, OperationType.GET, `staff_members/${emailLower}`)
+    (err) => {
+      if (isOfflineOrTimeoutError(err)) {
+        const cachedSession = loadOfflineSession();
+        if (cachedSession && cachedSession.email.toLowerCase() === emailLower) {
+          onData(cachedSession.profile);
+          return;
+        }
+      }
+      handleFirestoreError(err, OperationType.GET, `staff_members/${emailLower}`);
+    }
   );
 }
 
@@ -145,7 +224,10 @@ export function subscribeWilayahConfig(onData: (cfg: WilayahConfig) => void): Un
         });
       }
     },
-    (err) => handleFirestoreError(err, OperationType.GET, 'config/wilayah')
+    (err) => {
+      if (isOfflineOrTimeoutError(err)) return;
+      handleFirestoreError(err, OperationType.GET, 'config/wilayah');
+    }
   );
 }
 
@@ -175,7 +257,10 @@ export function subscribeSpreadsheetConfig(
     (snap) => {
       onData(snap.exists() ? (snap.data() as SpreadsheetConfig) : null);
     },
-    (err) => handleFirestoreError(err, OperationType.GET, 'config/spreadsheet')
+    (err) => {
+      if (isOfflineOrTimeoutError(err)) return;
+      handleFirestoreError(err, OperationType.GET, 'config/spreadsheet');
+    }
   );
 }
 
@@ -216,7 +301,10 @@ export function subscribeStaffList(
       list.sort((a, b) => a.name.localeCompare(b.name, 'id'));
       onData(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'staff_members')
+    (err) => {
+      if (isOfflineOrTimeoutError(err)) return;
+      handleFirestoreError(err, OperationType.LIST, 'staff_members');
+    }
   );
 }
 
@@ -285,7 +373,10 @@ function subscribeChunkedByRt<T>(
       (snap) => {
         onData(snap.docs.map((d) => d.data() as T));
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, collectionName)
+      (err) => {
+        if (isOfflineOrTimeoutError(err)) return;
+        handleFirestoreError(err, OperationType.LIST, collectionName);
+      }
     );
   }
 
@@ -313,7 +404,10 @@ function subscribeChunkedByRt<T>(
         chunkResults.forEach((arr) => merged.push(...arr));
         onData(merged);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, collectionName)
+      (err) => {
+        if (isOfflineOrTimeoutError(err)) return;
+        handleFirestoreError(err, OperationType.LIST, collectionName);
+      }
     );
   });
 
@@ -361,6 +455,8 @@ export function subscribeRevisionLogs(
 }
 
 export async function getHouseholdPhoto(id_rt: string): Promise<string | null> {
+  const offlineUrl = await getOfflinePhoto(id_rt);
+  if (offlineUrl) return offlineUrl;
   try {
     const snap = await getDoc(doc(db, 'household_photos', id_rt));
     if (snap.exists()) {
@@ -612,15 +708,14 @@ async function ensurePhotoUnderLimit(dataUrl: string, maxChars = 420000): Promis
   });
 }
 
-export async function submitHouseholdCensus(params: {
+export function buildSubmissionArtifacts(params: {
   existingHousehold: HouseholdRecord;
   draft: CensusDraft;
   actorEmail: string;
   actorName: string;
-  actorRole: UserRole;
-  revisionReason?: string;
-}): Promise<{ updatedHousehold: HouseholdRecord; visit: VisitRecord; cleanedPii: MemberPiiItem[] }> {
-  const { existingHousehold, draft, actorEmail, actorName, actorRole, revisionReason } = params;
+  visitId?: string;
+}) {
+  const { existingHousehold, draft, actorEmail, actorName } = params;
   const emailLower = actorEmail.toLowerCase();
   const nowIso = new Date().toISOString();
 
@@ -648,6 +743,85 @@ export async function submitHouseholdCensus(params: {
     existingHousehold.verifikasi_status === 'dikembalikan'
       ? 'belum'
       : existingHousehold.verifikasi_status;
+
+  const visitId =
+    params.visitId || `vis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const visitData: VisitRecord = {
+    visitId,
+    id_rt: existingHousehold.id_rt,
+    rtKey: existingHousehold.rtKey,
+    dusun: existingHousehold.dusun,
+    rw: existingHousehold.rw,
+    rt: existingHousehold.rt,
+    enumerator_email: emailLower.slice(0, 200),
+    enumerator_name: actorName.slice(0, 150),
+    waktu: nowIso,
+    status_kunjungan: cleaned.modul0.status_kunjungan || 'ditemui',
+    ...(cleaned.modul0.kunjungan_ke !== undefined
+      ? { kunjungan_ke: cleaned.modul0.kunjungan_ke }
+      : {}),
+    ...(cleaned.modul0.persetujuan ? { persetujuan: cleaned.modul0.persetujuan } : {}),
+    lokasi: cleaned.modul0.lokasi || {
+      lat: 0,
+      lng: 0,
+      akurasi: 999,
+      waktu: nowIso,
+      metode: 'manual',
+      alasan_manual: 'Tidak tersedia',
+    },
+    ...(cleaned.modulC?.catatan_enumerator
+      ? { catatan: cleaned.modulC.catatan_enumerator.slice(0, 500) }
+      : {}),
+  };
+
+  const updatedHousehold: HouseholdRecord = {
+    ...existingHousehold,
+    status_cacah: nextStatusCacah,
+    verifikasi_status: nextVerifikasiStatus,
+    modul0: cleaned.modul0,
+    ...(cleaned.modulA ? { modulA: cleaned.modulA } : {}),
+    ...(cleaned.modulB ? { modulB: cleaned.modulB } : {}),
+    ...(cleaned.modulC ? { modulC: cleaned.modulC } : {}),
+    enumerator_email: emailLower,
+    enumerator_name: actorName,
+    submittedAt: existingHousehold.submittedAt || nowIso,
+    sheetSynced: false,
+  };
+
+  const cleanedPiiRecord: HouseholdPiiRecord = {
+    id_rt: existingHousehold.id_rt,
+    rtKey: existingHousehold.rtKey,
+    membersPii: cleaned.membersPii,
+    updatedBy: emailLower.slice(0, 200),
+  };
+
+  return {
+    cleaned,
+    nextStatusCacah,
+    nextVerifikasiStatus,
+    nowIso,
+    visitId,
+    visitData,
+    updatedHousehold,
+    cleanedPiiRecord,
+  };
+}
+
+export async function submitHouseholdCensus(params: {
+  existingHousehold: HouseholdRecord;
+  draft: CensusDraft;
+  actorEmail: string;
+  actorName: string;
+  actorRole: UserRole;
+  revisionReason?: string;
+  visitId?: string;
+}): Promise<{ updatedHousehold: HouseholdRecord; visit: VisitRecord; cleanedPii: MemberPiiItem[] }> {
+  const { existingHousehold, draft, actorEmail, actorName, actorRole, revisionReason } = params;
+  const emailLower = actorEmail.toLowerCase();
+  const artifacts = buildSubmissionArtifacts(params);
+  const { cleaned, nextStatusCacah, nextVerifikasiStatus, nowIso, visitData, updatedHousehold } =
+    artifacts;
 
   const isPostSubmitRevision = Boolean(existingHousehold.submittedAt);
 
@@ -703,39 +877,13 @@ export async function submitHouseholdCensus(params: {
     }
 
     // 4. Always record visit log (including failed visits)
-    const visitId = `vis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const visitData: VisitRecord = {
-      visitId,
-      id_rt: existingHousehold.id_rt,
-      rtKey: existingHousehold.rtKey,
-      dusun: existingHousehold.dusun,
-      rw: existingHousehold.rw,
-      rt: existingHousehold.rt,
-      enumerator_email: emailLower.slice(0, 200),
-      enumerator_name: actorName.slice(0, 150),
-      waktu: nowIso,
-      status_kunjungan: cleaned.modul0.status_kunjungan || 'ditemui',
-      ...(cleaned.modul0.kunjungan_ke !== undefined ? { kunjungan_ke: cleaned.modul0.kunjungan_ke } : {}),
-      ...(cleaned.modul0.persetujuan ? { persetujuan: cleaned.modul0.persetujuan } : {}),
-      lokasi: cleaned.modul0.lokasi || {
-        lat: 0,
-        lng: 0,
-        akurasi: 999,
-        waktu: nowIso,
-        metode: 'manual',
-        alasan_manual: 'Tidak tersedia',
-      },
-      ...(cleaned.modulC?.catatan_enumerator
-        ? { catatan: cleaned.modulC.catatan_enumerator.slice(0, 500) }
-        : {}),
-    };
     try {
-      await setDoc(doc(db, 'visits', visitId), stripUndefined({
+      await setDoc(doc(db, 'visits', visitData.visitId), stripUndefined({
         ...visitData,
         createdAt: serverTimestamp(),
       }));
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `visits/${visitId}`);
+      handleFirestoreError(err, OperationType.CREATE, `visits/${visitData.visitId}`);
     }
 
     // 5. Log post-submit revisions if previously submitted
@@ -773,20 +921,6 @@ export async function submitHouseholdCensus(params: {
 
     clearLocalDraft(existingHousehold.id_rt);
 
-    const updatedHousehold: HouseholdRecord = {
-      ...existingHousehold,
-      status_cacah: nextStatusCacah,
-      verifikasi_status: nextVerifikasiStatus,
-      modul0: cleaned.modul0,
-      ...(cleaned.modulA ? { modulA: cleaned.modulA } : {}),
-      ...(cleaned.modulB ? { modulB: cleaned.modulB } : {}),
-      ...(cleaned.modulC ? { modulC: cleaned.modulC } : {}),
-      enumerator_email: emailLower,
-      enumerator_name: actorName,
-      submittedAt: existingHousehold.submittedAt || nowIso,
-      sheetSynced: false,
-    };
-
     return { updatedHousehold, visit: visitData, cleanedPii: cleaned.membersPii };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('{')) {
@@ -794,6 +928,383 @@ export async function submitHouseholdCensus(params: {
     }
     handleFirestoreError(error, OperationType.WRITE, `submit/${existingHousehold.id_rt}`);
   }
+}
+
+export function queueOfflineListing(
+  params: {
+    dusun: DusunCode;
+    rw: string;
+    rt: string;
+    no_bangunan: string;
+    nama_kk_daftar: string;
+    alamat: string;
+    sumber: SumberDaftar;
+  },
+  actorEmail: string
+): HouseholdRecord {
+  const rwPad = params.rw.padStart(2, '0');
+  const rtPad = params.rt.padStart(2, '0');
+  const rtKey = `${params.dusun}-${rwPad}-${rtPad}`;
+  const tempId = `LOCAL-${rtKey}-${Date.now().toString(36).toUpperCase()}`;
+
+  const tempHousehold: HouseholdRecord = {
+    id_rt: tempId,
+    dusun: params.dusun,
+    rw: rwPad,
+    rt: rtPad,
+    rtKey,
+    urutan: 0,
+    no_bangunan: params.no_bangunan.trim().slice(0, 30),
+    nama_kk_daftar: params.nama_kk_daftar.trim().slice(0, 150),
+    alamat: params.alamat.trim().slice(0, 300),
+    sumber: params.sumber,
+    status_daftar: 'aktif',
+    status_cacah: 'belum_dikunjungi',
+    verifikasi_status: 'belum',
+    createdBy: actorEmail.toLowerCase().slice(0, 200),
+  };
+
+  enqueueOfflineItem(actorEmail, {
+    queueId: `q_list_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: 'create_listing',
+    createdAt: new Date().toISOString(),
+    tempId,
+    params: { ...params, rw: rwPad, rt: rtPad },
+    actorEmail: actorEmail.toLowerCase(),
+    tempHousehold,
+  });
+
+  return tempHousehold;
+}
+
+export function queueOfflineMasterStatus(
+  actorEmail: string,
+  id_rt: string,
+  status_daftar: StatusDaftar,
+  catatan_daftar: string
+): void {
+  enqueueOfflineItem(actorEmail, {
+    queueId: `q_stat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: 'master_status',
+    createdAt: new Date().toISOString(),
+    id_rt,
+    status_daftar,
+    catatan_daftar: catatan_daftar.trim(),
+  });
+}
+
+export async function queueOfflineDraft(params: {
+  existingHousehold: HouseholdRecord;
+  draft: CensusDraft;
+  actorEmail: string;
+  actorName: string;
+}): Promise<void> {
+  const { existingHousehold, draft, actorEmail, actorName } = params;
+  saveLocalDraft(draft);
+  const hasOfflinePhoto = Boolean(draft.fotoDataUrl);
+  if (draft.fotoDataUrl) {
+    await saveOfflinePhoto(existingHousehold.id_rt, draft.fotoDataUrl);
+  }
+  enqueueOfflineItem(actorEmail, {
+    queueId: `q_draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: 'save_draft',
+    createdAt: new Date().toISOString(),
+    id_rt: existingHousehold.id_rt,
+    existingHousehold,
+    draft: { ...draft, fotoDataUrl: null },
+    hasOfflinePhoto,
+    actorEmail: actorEmail.toLowerCase(),
+    actorName,
+  });
+}
+
+export async function queueOfflineSubmission(params: {
+  existingHousehold: HouseholdRecord;
+  draft: CensusDraft;
+  actorEmail: string;
+  actorName: string;
+  actorRole: UserRole;
+  revisionReason?: string;
+  visitId?: string;
+  firestoreSynced?: boolean;
+  sheetSynced?: boolean;
+}): Promise<{ updatedHousehold: HouseholdRecord; visit: VisitRecord; cleanedPii: MemberPiiItem[] }> {
+  const {
+    existingHousehold,
+    draft,
+    actorEmail,
+    actorName,
+    actorRole,
+    revisionReason,
+    firestoreSynced = false,
+    sheetSynced = false,
+  } = params;
+
+  const artifacts = buildSubmissionArtifacts({
+    existingHousehold,
+    draft,
+    actorEmail,
+    actorName,
+    visitId: params.visitId,
+  });
+
+  let hasOfflinePhoto = false;
+  if (draft.fotoDataUrl) {
+    const safePhoto = await ensurePhotoUnderLimit(draft.fotoDataUrl, 420000);
+    await saveOfflinePhoto(existingHousehold.id_rt, safePhoto);
+    hasOfflinePhoto = true;
+  }
+
+  enqueueOfflineItem(actorEmail, {
+    queueId: `q_sub_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: 'submit_census',
+    createdAt: new Date().toISOString(),
+    id_rt: existingHousehold.id_rt,
+    existingHousehold,
+    draft: { ...draft, fotoDataUrl: null },
+    hasOfflinePhoto,
+    actorEmail: actorEmail.toLowerCase(),
+    actorName,
+    actorRole,
+    revisionReason,
+    visitId: artifacts.visitId,
+    optimisticHousehold: artifacts.updatedHousehold,
+    optimisticPii: artifacts.cleanedPiiRecord,
+    optimisticVisit: artifacts.visitData,
+    firestoreSynced,
+    sheetSynced,
+  });
+
+  clearLocalDraft(existingHousehold.id_rt);
+
+  return {
+    updatedHousehold: artifacts.updatedHousehold,
+    visit: artifacts.visitData,
+    cleanedPii: artifacts.cleaned.membersPii,
+  };
+}
+
+export async function flushOfflineSyncQueue(params: {
+  actorEmail: string;
+  actorRole: UserRole;
+  hasFirebaseUser: boolean;
+  spreadsheetConfig: SpreadsheetConfig | null;
+  households: HouseholdRecord[];
+  piiRecords: HouseholdPiiRecord[];
+  visits: VisitRecord[];
+  syncedSheetIdsInSession?: Set<string>;
+}): Promise<{ firestoreSyncedCount: number; sheetSyncedCount: number; remainingCount: number }> {
+  const {
+    actorEmail,
+    actorRole,
+    hasFirebaseUser,
+    spreadsheetConfig,
+    households,
+    piiRecords,
+    visits,
+    syncedSheetIdsInSession,
+  } = params;
+
+  const emailLower = actorEmail.toLowerCase();
+  const initialQueue = loadOfflineQueue(emailLower);
+
+  if (!hasFirebaseUser || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    return {
+      firestoreSyncedCount: 0,
+      sheetSyncedCount: 0,
+      remainingCount: initialQueue.length,
+    };
+  }
+
+  let firestoreSyncedCount = 0;
+  let sheetSyncedCount = 0;
+  const failedTempIds = new Set<string>();
+  const processedSheetIds = new Set<string>();
+
+  for (const snapshotItem of initialQueue) {
+    // Baca ulang item terbaru dari localStorage agar hasil remap tempId terbawa
+    const liveQueue = loadOfflineQueue(emailLower);
+    const item = liveQueue.find((q) => q.queueId === snapshotItem.queueId);
+    if (!item) continue;
+
+    if (item.type === 'create_listing') {
+      try {
+        const created = await withNetworkTimeout(
+          createHouseholdListingTransactional(item.params, item.actorEmail),
+          15000
+        );
+        await remapTempIdInQueue(emailLower, item.tempId, created);
+        removeOfflineQueueItem(emailLower, item.queueId);
+        firestoreSyncedCount++;
+      } catch (err) {
+        console.warn('Gagal menyinkronkan listing luring:', err);
+        failedTempIds.add(item.tempId);
+      }
+      continue;
+    }
+
+    if (item.id_rt.startsWith('LOCAL-') || failedTempIds.has(item.id_rt)) {
+      continue;
+    }
+
+    if (item.type === 'master_status') {
+      try {
+        await withNetworkTimeout(
+          updateHouseholdMasterStatus(item.id_rt, item.status_daftar, item.catatan_daftar),
+          12000
+        );
+        removeOfflineQueueItem(emailLower, item.queueId);
+        firestoreSyncedCount++;
+      } catch (err) {
+        console.warn('Gagal menyinkronkan status daftar luring:', err);
+      }
+      continue;
+    }
+
+    if (item.type === 'save_draft') {
+      try {
+        await withNetworkTimeout(
+          saveHouseholdDraftRemote(
+            item.existingHousehold,
+            item.draft,
+            item.actorEmail,
+            item.actorName
+          ),
+          12000
+        );
+        removeOfflineQueueItem(emailLower, item.queueId);
+        firestoreSyncedCount++;
+      } catch (err) {
+        console.warn('Gagal menyinkronkan draf luring:', err);
+      }
+      continue;
+    }
+
+    if (item.type === 'submit_census') {
+      let currentItem: OfflineQueueItem = item;
+      let isFirestoreOk = item.firestoreSynced;
+      let isSheetOk = item.sheetSynced;
+
+      if (!isFirestoreOk) {
+        try {
+          const offlinePhoto = item.hasOfflinePhoto ? await getOfflinePhoto(item.id_rt) : null;
+          await withNetworkTimeout(
+            submitHouseholdCensus({
+              existingHousehold: item.existingHousehold,
+              draft: {
+                ...item.draft,
+                fotoDataUrl: offlinePhoto || item.draft.fotoDataUrl || null,
+              },
+              actorEmail: item.actorEmail,
+              actorName: item.actorName,
+              actorRole: item.actorRole,
+              revisionReason: item.revisionReason,
+              visitId: item.visitId,
+            }),
+            20000
+          );
+          isFirestoreOk = true;
+          firestoreSyncedCount++;
+          updateOfflineQueueItem(emailLower, item.queueId, (prev) =>
+            prev.type === 'submit_census' ? { ...prev, firestoreSynced: true } : prev
+          );
+        } catch (err) {
+          console.warn('Gagal menyinkronkan pengiriman sensus ke Firestore:', err);
+          continue;
+        }
+      }
+
+      if (isFirestoreOk && !isSheetOk && spreadsheetConfig?.webhookUrl) {
+        try {
+          await appendSubmissionViaWebhook({
+            webhookUrl: spreadsheetConfig.webhookUrl,
+            household: currentItem.optimisticHousehold,
+            pii: currentItem.optimisticPii,
+            visit: currentItem.optimisticVisit,
+          });
+          await markHouseholdSheetSynced(currentItem.id_rt);
+          isSheetOk = true;
+          sheetSyncedCount++;
+          processedSheetIds.add(currentItem.id_rt);
+          syncedSheetIdsInSession?.add(currentItem.id_rt);
+          updateOfflineQueueItem(emailLower, item.queueId, (prev) =>
+            prev.type === 'submit_census' ? { ...prev, sheetSynced: true } : prev
+          );
+        } catch (err) {
+          console.warn('Gagal menyinkronkan ke Google Spreadsheet:', err);
+        }
+      }
+
+      if (isFirestoreOk && (isSheetOk || !spreadsheetConfig?.webhookUrl)) {
+        removeOfflineQueueItem(emailLower, item.queueId);
+        await deleteOfflinePhoto(item.id_rt);
+      }
+    }
+  }
+
+  // Juga kirim data sensus milik petugas (atau semua untuk admin) yang sudah masuk Firestore namun sheetSynced === false
+  if (spreadsheetConfig?.webhookUrl) {
+    const unsyncedHouseholds = households.filter((h) => {
+      if (!h.submittedAt || h.sheetSynced) return false;
+      if (processedSheetIds.has(h.id_rt)) return false;
+      if (syncedSheetIdsInSession?.has(h.id_rt)) return false;
+      if (actorRole === 'admin') return true;
+      return (
+        h.enumerator_email?.toLowerCase() === emailLower ||
+        h.createdBy?.toLowerCase() === emailLower
+      );
+    });
+
+    for (const h of unsyncedHouseholds) {
+      try {
+        const pii = piiRecords.find((p) => p.id_rt === h.id_rt) || {
+          id_rt: h.id_rt,
+          rtKey: h.rtKey,
+          membersPii: [],
+          updatedBy: h.enumerator_email || emailLower,
+        };
+        const latestVisit = visits.find((v) => v.id_rt === h.id_rt) || {
+          visitId: `vis_sync_${h.id_rt}`,
+          id_rt: h.id_rt,
+          rtKey: h.rtKey,
+          dusun: h.dusun,
+          rw: h.rw,
+          rt: h.rt,
+          enumerator_email: h.enumerator_email || emailLower,
+          enumerator_name: h.enumerator_name || '',
+          waktu: h.submittedAt || new Date().toISOString(),
+          status_kunjungan: h.modul0?.status_kunjungan || 'ditemui',
+          kunjungan_ke: h.modul0?.kunjungan_ke,
+          persetujuan: h.modul0?.persetujuan,
+          lokasi: h.modul0?.lokasi || {
+            lat: 0,
+            lng: 0,
+            akurasi: 999,
+            waktu: h.submittedAt || new Date().toISOString(),
+            metode: 'manual',
+          },
+        };
+
+        await appendSubmissionViaWebhook({
+          webhookUrl: spreadsheetConfig.webhookUrl,
+          household: h,
+          pii,
+          visit: latestVisit,
+        });
+        await markHouseholdSheetSynced(h.id_rt);
+        syncedSheetIdsInSession?.add(h.id_rt);
+        sheetSyncedCount++;
+      } catch (err) {
+        console.warn(`Gagal auto-sync Spreadsheet untuk ${h.id_rt}:`, err);
+      }
+    }
+  }
+
+  return {
+    firestoreSyncedCount,
+    sheetSyncedCount,
+    remainingCount: loadOfflineQueue(emailLower).length,
+  };
 }
 
 export async function markHouseholdSheetSynced(id_rt: string): Promise<void> {

@@ -15,8 +15,12 @@ import {
 } from '../data/instrumentSpec';
 import {
   createHouseholdListingTransactional,
+  isOfflineOrTimeoutError,
   loadLocalDraft,
+  queueOfflineListing,
+  queueOfflineMasterStatus,
   updateHouseholdMasterStatus,
+  withNetworkTimeout,
 } from '../services/firestoreService';
 import {
   DusunCode,
@@ -33,6 +37,8 @@ interface HouseholdListViewProps {
   wilayah: WilayahConfig;
   households: HouseholdRecord[];
   isOnline: boolean;
+  hasFirebaseUser: boolean;
+  pendingSyncIds: Set<string>;
   onOpenQuestionnaire: (h: HouseholdRecord) => void;
 }
 
@@ -41,6 +47,8 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   wilayah,
   households,
   isOnline,
+  hasFirebaseUser,
+  pendingSyncIds,
   onOpenQuestionnaire,
 }) => {
   const isAdmin = profile.role === 'admin';
@@ -159,31 +167,41 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
       setListingError('Nomor bangunan dan nama kepala rumah tangga wajib diisi.');
       return;
     }
-    if (!isOnline) {
-      setListingError(
-        'Penambahan ID baru ke Daftar Induk memerlukan koneksi internet sesaat agar transaksi penghitung RT tidak bentrok antar enumerator.'
-      );
+
+    const listingParams = {
+      dusun: activeRtMeta.dusun,
+      rw: activeRtMeta.rw,
+      rt: activeRtMeta.rt,
+      no_bangunan: listingNoBangunan,
+      nama_kk_daftar: listingNamaKk,
+      alamat: listingAlamat,
+      sumber: listingSumber,
+    };
+
+    if (!isOnline || !hasFirebaseUser) {
+      const createdLocal = queueOfflineListing(listingParams, profile.email);
+      setLastBuildingNo(createdLocal.no_bangunan);
+      setShowListingModal(false);
       return;
     }
+
     setListingSaving(true);
     setListingError(null);
     try {
-      const created = await createHouseholdListingTransactional(
-        {
-          dusun: activeRtMeta.dusun,
-          rw: activeRtMeta.rw,
-          rt: activeRtMeta.rt,
-          no_bangunan: listingNoBangunan,
-          nama_kk_daftar: listingNamaKk,
-          alamat: listingAlamat,
-          sumber: listingSumber,
-        },
-        profile.email
+      const created = await withNetworkTimeout(
+        createHouseholdListingTransactional(listingParams, profile.email),
+        10000
       );
       setLastBuildingNo(created.no_bangunan);
       setShowListingModal(false);
     } catch (err: any) {
-      setListingError(err?.message || 'Gagal menambahkan rumah tangga baru.');
+      if (isOfflineOrTimeoutError(err)) {
+        const createdLocal = queueOfflineListing(listingParams, profile.email);
+        setLastBuildingNo(createdLocal.no_bangunan);
+        setShowListingModal(false);
+      } else {
+        setListingError(err?.message || 'Gagal menambahkan rumah tangga baru.');
+      }
     } finally {
       setListingSaving(false);
     }
@@ -192,14 +210,38 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   const handleSaveMasterStatus = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!statusModalTarget) return;
-    setSavingMasterStatus(true);
-    try {
-      await updateHouseholdMasterStatus(
+    if (!isOnline || !hasFirebaseUser || statusModalTarget.id_rt.startsWith('LOCAL-')) {
+      queueOfflineMasterStatus(
+        profile.email,
         statusModalTarget.id_rt,
         editStatusDaftar,
         editCatatanDaftar
       );
       setStatusModalTarget(null);
+      return;
+    }
+
+    setSavingMasterStatus(true);
+    try {
+      await withNetworkTimeout(
+        updateHouseholdMasterStatus(
+          statusModalTarget.id_rt,
+          editStatusDaftar,
+          editCatatanDaftar
+        ),
+        6000
+      );
+      setStatusModalTarget(null);
+    } catch (err) {
+      if (isOfflineOrTimeoutError(err)) {
+        queueOfflineMasterStatus(
+          profile.email,
+          statusModalTarget.id_rt,
+          editStatusDaftar,
+          editCatatanDaftar
+        );
+        setStatusModalTarget(null);
+      }
     } finally {
       setSavingMasterStatus(false);
     }
@@ -387,6 +429,11 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
                           Terverifikasi
                         </span>
                       )}
+                      {pendingSyncIds.has(h.id_rt) && (
+                        <span className="rounded-md border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-950">
+                          Tersimpan Lokal · Menunggu Online
+                        </span>
+                      )}
                       {h.status_daftar !== 'aktif' && (
                         <span className="rounded-md border border-stone-300 bg-stone-200 px-2 py-0.5 text-[11px] font-bold text-stone-900 uppercase">
                           {h.status_daftar.replace('_', ' ')}
@@ -465,7 +512,11 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
             {!isOnline && (
               <div className="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
                 <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>Perangkat sedang offline. Penambahan ID baru membutuhkan koneksi internet.</span>
+                <span>
+                  Perangkat sedang luring. Rumah tangga akan disimpan dengan ID sementara (
+                  <span className="font-mono font-bold">LOCAL-...</span>) agar langsung bisa
+                  dicacah, lalu otomatis memperoleh ID resmi saat online.
+                </span>
               </div>
             )}
 

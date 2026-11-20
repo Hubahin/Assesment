@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
   BarChart3,
@@ -9,6 +9,7 @@ import {
   FileCheck2,
   LogOut,
   Map as MapIcon,
+  RefreshCw,
   Settings,
   Users,
   X,
@@ -28,6 +29,7 @@ import { googleSignIn, initAuth, logout, testConnection } from './lib/firebase';
 import {
   BOOTSTRAP_ADMIN_EMAIL,
   ensureBootstrapSetup,
+  flushOfflineSyncQueue,
   subscribeHouseholdPii,
   subscribeHouseholds,
   subscribeMyStaffProfile,
@@ -37,6 +39,23 @@ import {
   subscribeVisits,
   subscribeWilayahConfig,
 } from './services/firestoreService';
+import {
+  applyOfflineQueueOverlay,
+  clearOfflineSession,
+  createOfflineAuthSessionForEmail,
+  KnownAccountRecord,
+  loadGlobalCacheSlice,
+  loadKnownAccounts,
+  loadOfflineQueue,
+  loadOfflineSession,
+  loadUserCacheSlice,
+  OfflineAuthSession,
+  OfflineQueueItem,
+  saveGlobalCacheSlice,
+  saveKnownAccount,
+  saveOfflineSession,
+  saveUserCacheSlice,
+} from './services/offlineStore';
 import {
   HouseholdPiiRecord,
   HouseholdRecord,
@@ -74,10 +93,19 @@ const ROLE_LABELS: Record<UserRole, string> = {
 
 export default function App() {
   const isOnline = useOnlineStatus();
+  const [offlineSession, setOfflineSession] = useState<OfflineAuthSession | null>(() =>
+    loadOfflineSession()
+  );
+  const [knownAccounts, setKnownAccounts] = useState<KnownAccountRecord[]>(() =>
+    loadKnownAccounts()
+  );
+
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  const [profile, setProfile] = useState<StaffMember | null>(null);
+  const [profile, setProfile] = useState<StaffMember | null>(
+    () => loadOfflineSession()?.profile ?? null
+  );
   const [profileLoading, setProfileLoading] = useState(true);
 
   const [wilayah, setWilayah] = useState<WilayahConfig>({
@@ -91,36 +119,116 @@ export default function App() {
   const [piiRecords, setPiiRecords] = useState<HouseholdPiiRecord[]>([]);
   const [visits, setVisits] = useState<VisitRecord[]>([]);
   const [revisionLogs, setRevisionLogs] = useState<RevisionLogRecord[]>([]);
+  const [offlineQueue, setOfflineQueue] = useState<OfflineQueueItem[]>(() => {
+    const sess = loadOfflineSession();
+    return sess?.email ? loadOfflineQueue(sess.email) : [];
+  });
 
   const [activeTab, setActiveTab] = useState<NavTabId>('pendataan');
   const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isSyncingQueue, setIsSyncingQueue] = useState(false);
+
+  const isSyncingRef = useRef(false);
+  const syncedSheetIdsInSessionRef = useRef<Set<string>>(new Set());
+
+  const activeEmail = useMemo(() => {
+    return (user?.email || offlineSession?.email || '').toLowerCase();
+  }, [user, offlineSession]);
+
+  // Listen for offline queue mutations from any view
+  useEffect(() => {
+    const refreshQueue = () => {
+      if (activeEmail) {
+        setOfflineQueue(loadOfflineQueue(activeEmail));
+      } else {
+        setOfflineQueue([]);
+      }
+    };
+    refreshQueue();
+    window.addEventListener('cbw-offline-queue-changed', refreshQueue);
+    window.addEventListener('storage', refreshQueue);
+    return () => {
+      window.removeEventListener('cbw-offline-queue-changed', refreshQueue);
+      window.removeEventListener('storage', refreshQueue);
+    };
+  }, [activeEmail]);
 
   useEffect(() => {
-    testConnection();
+    if (isOnline) {
+      testConnection();
+    }
     const unsub = initAuth((authUser) => {
       setUser(authUser);
       setAuthReady(true);
       if (!authUser) {
-        setProfile(null);
-        setProfileLoading(false);
-        setActiveHouseholdId(null);
+        const cached = loadOfflineSession();
+        if (cached) {
+          setOfflineSession(cached);
+          setProfile(cached.profile);
+          setProfileLoading(false);
+        } else {
+          setProfile(null);
+          setProfileLoading(false);
+          setActiveHouseholdId(null);
+        }
       }
     });
     return () => unsub();
   }, []);
 
+  // Hydrate cached datasets immediately when activeEmail is available
+  useEffect(() => {
+    if (!activeEmail) return;
+    const cachedWilayah =
+      loadUserCacheSlice(activeEmail, 'wilayah') ||
+      loadGlobalCacheSlice<WilayahConfig>('wilayah');
+    if (cachedWilayah) setWilayah(cachedWilayah);
+
+    const cachedSheet =
+      loadUserCacheSlice(activeEmail, 'spreadsheetConfig') ??
+      loadGlobalCacheSlice<SpreadsheetConfig | null>('spreadsheetConfig');
+    if (cachedSheet) setSpreadsheetConfig(cachedSheet);
+
+    const cachedStaff = loadUserCacheSlice(activeEmail, 'staffList');
+    if (cachedStaff) setStaffList(cachedStaff);
+
+    const cachedHh = loadUserCacheSlice(activeEmail, 'households');
+    if (cachedHh) setHouseholds(cachedHh);
+
+    const cachedPii = loadUserCacheSlice(activeEmail, 'piiRecords');
+    if (cachedPii) setPiiRecords(cachedPii);
+
+    const cachedVisits = loadUserCacheSlice(activeEmail, 'visits');
+    if (cachedVisits) setVisits(cachedVisits);
+
+    const cachedLogs = loadUserCacheSlice(activeEmail, 'revisionLogs');
+    if (cachedLogs) setRevisionLogs(cachedLogs);
+  }, [activeEmail]);
+
   useEffect(() => {
     if (!user?.email) {
-      setProfile(null);
-      setProfileLoading(false);
+      const cached = loadOfflineSession();
+      if (cached) {
+        setProfile(cached.profile);
+        setProfileLoading(false);
+      } else {
+        setProfile(null);
+        setProfileLoading(false);
+      }
       return;
     }
 
     const email = user.email.toLowerCase();
-    setProfileLoading(true);
+    const cached = loadOfflineSession();
+    if (cached && cached.email.toLowerCase() === email) {
+      setProfile(cached.profile);
+      setProfileLoading(false);
+    } else {
+      setProfileLoading(true);
+    }
 
-    if (email === BOOTSTRAP_ADMIN_EMAIL) {
+    if (email === BOOTSTRAP_ADMIN_EMAIL && isOnline) {
       ensureBootstrapSetup(email, user.displayName || 'Admin I\'ComDev').catch((err) =>
         console.warn('Bootstrap admin notice:', err)
       );
@@ -129,35 +237,195 @@ export default function App() {
     const unsub = subscribeMyStaffProfile(email, (staff) => {
       setProfile(staff);
       setProfileLoading(false);
+      if (staff && staff.active) {
+        const nextSession: OfflineAuthSession = {
+          email,
+          displayName: user.displayName || staff.name,
+          uid: user.uid,
+          profile: staff,
+          savedAt: new Date().toISOString(),
+          isProvisionalOffline: false,
+        };
+        saveOfflineSession(nextSession);
+        saveKnownAccount({
+          email,
+          displayName: user.displayName || staff.name,
+          uid: user.uid,
+          profile: staff,
+          lastSignedInAt: new Date().toISOString(),
+        });
+        setOfflineSession(nextSession);
+        setKnownAccounts(loadKnownAccounts());
+      } else if (staff === null && isOnline) {
+        // Server mengonfirmasi akun dihapus/belum terdaftar saat online
+        clearOfflineSession();
+        setOfflineSession(null);
+      } else if (staff && !staff.active && isOnline) {
+        saveOfflineSession({
+          email,
+          displayName: user.displayName || staff.name,
+          uid: user.uid,
+          profile: staff,
+          savedAt: new Date().toISOString(),
+        });
+      }
     });
 
     return () => unsub();
-  }, [user]);
+  }, [user, isOnline]);
 
   useEffect(() => {
     if (!user || !profile || !profile.active) {
-      setStaffList([]);
-      setHouseholds([]);
-      setPiiRecords([]);
-      setVisits([]);
-      setRevisionLogs([]);
       return;
     }
+    const emailLower = (user.email || profile.email).toLowerCase();
 
     const unsubs = [
-      subscribeWilayahConfig(setWilayah),
-      subscribeSpreadsheetConfig(setSpreadsheetConfig),
-      subscribeStaffList(profile.role, setStaffList),
-      subscribeHouseholds(profile.role, profile.assignedRTs || [], setHouseholds),
-      subscribeHouseholdPii(profile.role, profile.assignedRTs || [], setPiiRecords),
-      subscribeVisits(profile.role, profile.assignedRTs || [], setVisits),
-      subscribeRevisionLogs(profile.role, profile.assignedRTs || [], setRevisionLogs),
+      subscribeWilayahConfig((cfg) => {
+        setWilayah(cfg);
+        saveUserCacheSlice(emailLower, 'wilayah', cfg);
+        saveGlobalCacheSlice('wilayah', cfg);
+      }),
+      subscribeSpreadsheetConfig((cfg) => {
+        setSpreadsheetConfig(cfg);
+        saveUserCacheSlice(emailLower, 'spreadsheetConfig', cfg);
+        saveGlobalCacheSlice('spreadsheetConfig', cfg);
+      }),
+      subscribeStaffList(profile.role, (list) => {
+        setStaffList(list);
+        saveUserCacheSlice(emailLower, 'staffList', list);
+      }),
+      subscribeHouseholds(profile.role, profile.assignedRTs || [], (list) => {
+        setHouseholds(list);
+        saveUserCacheSlice(emailLower, 'households', list);
+      }),
+      subscribeHouseholdPii(profile.role, profile.assignedRTs || [], (list) => {
+        setPiiRecords(list);
+        saveUserCacheSlice(emailLower, 'piiRecords', list);
+      }),
+      subscribeVisits(profile.role, profile.assignedRTs || [], (list) => {
+        setVisits(list);
+        saveUserCacheSlice(emailLower, 'visits', list);
+      }),
+      subscribeRevisionLogs(profile.role, profile.assignedRTs || [], (list) => {
+        setRevisionLogs(list);
+        saveUserCacheSlice(emailLower, 'revisionLogs', list);
+      }),
     ];
 
     return () => {
       unsubs.forEach((u) => u());
     };
   }, [user, profile]);
+
+  // Overlay offline mutations onto cached/Firestore data so the UI reflects offline submissions immediately
+  const overlayed = useMemo(() => {
+    return applyOfflineQueueOverlay({
+      households,
+      piiRecords,
+      visits,
+      queue: offlineQueue,
+    });
+  }, [households, piiRecords, visits, offlineQueue]);
+
+  const effectiveHouseholds = overlayed.households;
+  const effectivePii = overlayed.piiRecords;
+  const effectiveVisits = overlayed.visits;
+  const pendingSyncIds = overlayed.pendingSyncIds;
+
+  const pendingSheetCount = useMemo(() => {
+    return effectiveHouseholds.filter((h) => h.submittedAt && !h.sheetSynced).length;
+  }, [effectiveHouseholds]);
+
+  const runSyncNow = useCallback(
+    async (manual = false) => {
+      if (!isOnline || !user || !profile || !profile.active || isSyncingRef.current) {
+        return;
+      }
+      const emailLower = (user.email || profile.email).toLowerCase();
+      const currentQueue = loadOfflineQueue(emailLower);
+      const hasUnsyncedSheet =
+        Boolean(spreadsheetConfig?.webhookUrl) &&
+        households.some(
+          (h) =>
+            h.submittedAt &&
+            !h.sheetSynced &&
+            !syncedSheetIdsInSessionRef.current.has(h.id_rt) &&
+            (profile.role === 'admin' ||
+              h.enumerator_email?.toLowerCase() === emailLower ||
+              h.createdBy?.toLowerCase() === emailLower)
+        );
+
+      if (currentQueue.length === 0 && !hasUnsyncedSheet) {
+        if (manual) {
+          setToastMessage('Seluruh data sensus sudah sinkron dengan server & Spreadsheet.');
+        }
+        return;
+      }
+
+      isSyncingRef.current = true;
+      setIsSyncingQueue(true);
+      try {
+        const res = await flushOfflineSyncQueue({
+          actorEmail: emailLower,
+          actorRole: profile.role,
+          hasFirebaseUser: Boolean(user),
+          spreadsheetConfig,
+          households,
+          piiRecords,
+          visits,
+          syncedSheetIdsInSession: syncedSheetIdsInSessionRef.current,
+        });
+        setOfflineQueue(loadOfflineQueue(emailLower));
+
+        if (res.firestoreSyncedCount > 0 || res.sheetSyncedCount > 0) {
+          const parts: string[] = [];
+          if (res.firestoreSyncedCount > 0) {
+            parts.push(`${res.firestoreSyncedCount} data masuk ke database`);
+          }
+          if (res.sheetSyncedCount > 0) {
+            parts.push(`${res.sheetSyncedCount} data terkirim ke Google Spreadsheet`);
+          }
+          setToastMessage(`Sinkronisasi otomatis selesai: ${parts.join(' & ')}.`);
+        } else if (manual && res.remainingCount > 0) {
+          setToastMessage(
+            `${res.remainingCount} data masih menunggu sinkronisasi. Pastikan jaringan stabil.`
+          );
+        }
+      } finally {
+        isSyncingRef.current = false;
+        setIsSyncingQueue(false);
+      }
+    },
+    [isOnline, user, profile, spreadsheetConfig, households, piiRecords, visits]
+  );
+
+  // Trigger automatic background sync whenever online & authenticated with pending items
+  useEffect(() => {
+    if (!isOnline || !user || !profile || !profile.active) return;
+
+    const emailLower = (user.email || profile.email).toLowerCase();
+    const hasQueue = offlineQueue.length > 0;
+    const hasUnsyncedSheet =
+      Boolean(spreadsheetConfig?.webhookUrl) &&
+      households.some(
+        (h) =>
+          h.submittedAt &&
+          !h.sheetSynced &&
+          !syncedSheetIdsInSessionRef.current.has(h.id_rt) &&
+          (profile.role === 'admin' ||
+            h.enumerator_email?.toLowerCase() === emailLower ||
+            h.createdBy?.toLowerCase() === emailLower)
+      );
+
+    if (!hasQueue && !hasUnsyncedSheet) return;
+
+    const timer = setTimeout(() => {
+      runSyncNow(false);
+    }, 650);
+
+    return () => clearTimeout(timer);
+  }, [isOnline, user, profile, offlineQueue.length, spreadsheetConfig?.webhookUrl, households, runSyncNow]);
 
   const allowedTabs = useMemo(() => {
     if (!profile) return [];
@@ -171,17 +439,13 @@ export default function App() {
 
   const activeHousehold = useMemo(() => {
     if (!activeHouseholdId) return null;
-    return households.find((h) => h.id_rt === activeHouseholdId) || null;
-  }, [households, activeHouseholdId]);
+    return effectiveHouseholds.find((h) => h.id_rt === activeHouseholdId) || null;
+  }, [effectiveHouseholds, activeHouseholdId]);
 
   const activePii = useMemo(() => {
     if (!activeHouseholdId) return undefined;
-    return piiRecords.find((p) => p.id_rt === activeHouseholdId);
-  }, [piiRecords, activeHouseholdId]);
-
-  const pendingSheetCount = useMemo(() => {
-    return households.filter((h) => h.submittedAt && !h.sheetSynced).length;
-  }, [households]);
+    return effectivePii.find((p) => p.id_rt === activeHouseholdId);
+  }, [effectivePii, activeHouseholdId]);
 
   const handleSignIn = async () => {
     const res = await googleSignIn();
@@ -190,12 +454,43 @@ export default function App() {
     }
   };
 
+  const handleOfflineSignIn = (params: {
+    email: string;
+    name?: string;
+    selectedRTs?: string[];
+  }) => {
+    const sess = createOfflineAuthSessionForEmail({
+      ...params,
+      bootstrapAdminEmail: BOOTSTRAP_ADMIN_EMAIL,
+    });
+    setOfflineSession(sess);
+    setProfile(sess.profile);
+    setProfileLoading(false);
+    setToastMessage(
+      sess.isProvisionalOffline
+        ? `Masuk Mode Luring sebagai ${sess.email}. Data disimpan di perangkat dan akan dikirim setelah verifikasi Google saat online.`
+        : `Masuk Mode Luring dengan akun tersimpan (${sess.email}).`
+    );
+  };
+
   const handleSignOut = async () => {
+    clearOfflineSession();
+    setOfflineSession(null);
     setActiveHouseholdId(null);
+    setHouseholds([]);
+    setPiiRecords([]);
+    setVisits([]);
+    setRevisionLogs([]);
+    setStaffList([]);
+    setProfile(null);
     await logout();
   };
 
-  if (!authReady || (user && profileLoading)) {
+  const isOfflineFallbackAuth = !user && Boolean(offlineSession && profile && profile.active);
+  const canStayLoggedInOffline = isOfflineFallbackAuth;
+  const isAuthenticatedSession = Boolean((user || canStayLoggedInOffline) && profile && profile.active);
+
+  if (!authReady && !isOfflineFallbackAuth) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-slate-100 p-6 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-900 text-white shadow-sm">
@@ -207,18 +502,36 @@ export default function App() {
     );
   }
 
-  if (!user || !profile || !profile.active) {
+  if (user && profileLoading) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-100 p-6 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-900 text-white shadow-sm">
+          <ClipboardCheck className="h-6 w-6 animate-pulse" />
+        </div>
+        <p className="mt-4 text-sm font-bold text-slate-900">Memuat Sensus Cibiru Wetan 2026...</p>
+        <p className="mt-1 text-xs text-slate-500">Menyiapkan basis data luring &amp; profil petugas</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticatedSession || !profile) {
     return (
       <LoginView
         user={user}
         unregisteredEmail={user ? user.email || '' : null}
         inactiveMessage={Boolean(profile && !profile.active)}
+        knownAccounts={knownAccounts}
+        bootstrapAdminEmail={BOOTSTRAP_ADMIN_EMAIL}
         onSignIn={handleSignIn}
+        onOfflineSignIn={handleOfflineSignIn}
         onSignOut={handleSignOut}
+        onKnownAccountsChanged={() => setKnownAccounts(loadKnownAccounts())}
         isOnline={isOnline}
       />
     );
   }
+
+  const totalPendingLocalCount = offlineQueue.length;
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -269,12 +582,29 @@ export default function App() {
             {!isOnline ? (
               <span className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-900">
                 <CloudOff className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Mode Luring</span>
+                <span>
+                  {totalPendingLocalCount > 0
+                    ? `Luring · ${totalPendingLocalCount} lokal`
+                    : 'Mode Luring'}
+                </span>
               </span>
-            ) : pendingSheetCount > 0 && spreadsheetConfig?.webhookUrl ? (
-              <span className="hidden items-center gap-1 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] font-bold text-sky-900 sm:inline-flex">
-                <span>{pendingSheetCount} antre Sheet</span>
+            ) : isSyncingQueue ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1.5 text-[11px] font-bold text-sky-900">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                <span>Menyinkronkan...</span>
               </span>
+            ) : totalPendingLocalCount > 0 || (pendingSheetCount > 0 && spreadsheetConfig?.webhookUrl) ? (
+              <button
+                type="button"
+                onClick={() => (user ? runSyncNow(true) : handleSignIn())}
+                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-900 hover:bg-emerald-100"
+                title="Kirim antrean data lokal & sinkronkan ke Google Spreadsheet"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>
+                  Sinkron ({totalPendingLocalCount > 0 ? totalPendingLocalCount : pendingSheetCount})
+                </span>
+              </button>
             ) : null}
 
             <PWAInstallButton />
@@ -294,6 +624,29 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className={`mx-auto max-w-6xl px-4 py-4 ${!activeHousehold ? 'pb-24 md:pb-8' : ''}`}>
+        {/* Re-auth prompt only if offline fallback session regained internet without live Firebase Auth */}
+        {isOfflineFallbackAuth && isOnline && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-950">
+            <span>
+              Koneksi internet kembali aktif. Hubungkan akun Google ({profile.email}) untuk
+              verifikasi &amp; menyinkronkan{' '}
+              {totalPendingLocalCount > 0
+                ? `${totalPendingLocalCount} data yang tersimpan lokal`
+                : 'data'}{' '}
+              ke server &amp; Google Spreadsheet.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                handleSignIn().catch(() => {});
+              }}
+              className="min-h-[36px] rounded-lg bg-emerald-800 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-900"
+            >
+              Hubungkan Google &amp; Sinkronkan
+            </button>
+          </div>
+        )}
+
         {toastMessage && (
           <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-950 shadow-sm">
             <div className="flex items-center gap-2">
@@ -319,6 +672,7 @@ export default function App() {
             actorName={profile.name}
             actorRole={profile.role}
             isOnline={isOnline}
+            hasFirebaseUser={Boolean(user)}
             spreadsheetConfig={spreadsheetConfig}
             onClose={() => setActiveHouseholdId(null)}
             onSubmittedMessage={(msg) => setToastMessage(msg)}
@@ -329,28 +683,30 @@ export default function App() {
               <HouseholdListView
                 profile={profile}
                 wilayah={wilayah}
-                households={households}
+                households={effectiveHouseholds}
                 isOnline={isOnline}
+                hasFirebaseUser={Boolean(user)}
+                pendingSyncIds={pendingSyncIds}
                 onOpenQuestionnaire={(h) => setActiveHouseholdId(h.id_rt)}
               />
             )}
 
             {effectiveTab === 'verifikasi' && profile.role === 'admin' && (
-                <VerificationView
-                  profile={profile}
-                  households={households}
-                  piiRecords={piiRecords}
-                  revisionLogs={revisionLogs}
-                  onEditHousehold={(h) => setActiveHouseholdId(h.id_rt)}
-                />
-              )}
+              <VerificationView
+                profile={profile}
+                households={effectiveHouseholds}
+                piiRecords={effectivePii}
+                revisionLogs={revisionLogs}
+                onEditHousehold={(h) => setActiveHouseholdId(h.id_rt)}
+              />
+            )}
 
             {effectiveTab === 'cakupan' &&
               (profile.role === 'admin' || profile.role === 'koordinator') && (
                 <CoverageDashboardView
                   wilayah={wilayah}
-                  households={households}
-                  visits={visits}
+                  households={effectiveHouseholds}
+                  visits={effectiveVisits}
                 />
               )}
 
@@ -358,7 +714,7 @@ export default function App() {
               <CensusMapView
                 role={profile.role}
                 wilayah={wilayah}
-                households={households}
+                households={effectiveHouseholds}
               />
             )}
 
@@ -376,9 +732,9 @@ export default function App() {
                 adminEmail={profile.email}
                 wilayah={wilayah}
                 spreadsheetConfig={spreadsheetConfig}
-                households={households}
-                piiRecords={piiRecords}
-                visits={visits}
+                households={effectiveHouseholds}
+                piiRecords={effectivePii}
+                visits={effectiveVisits}
                 revisionLogs={revisionLogs}
               />
             )}
