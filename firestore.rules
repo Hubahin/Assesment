@@ -80,6 +80,17 @@ service cloud.firestore {
       return isVerifiedEmail() && hasStaffDoc() && staffData().active == true && staffData().role == 'enumerator';
     }
 
+    function isEnumeratorUnderKoordinator(data) {
+      return data.role == 'enumerator' && (
+        !('koordinatorEmail' in data) ||
+        data.koordinatorEmail == '' ||
+        data.koordinatorEmail == myEmail()
+      ) && (
+        (data.assignedRTs is list && data.assignedRTs.hasAny(staffData().assignedRTs)) ||
+        ('koordinatorEmail' in data && data.koordinatorEmail == myEmail() && data.assignedRTs is list && data.assignedRTs.size() == 0)
+      );
+    }
+
     function isStaffAssignedToRt(staff, rtKey) {
       return staff.active == true && (
         staff.role == 'admin' ||
@@ -307,7 +318,9 @@ service cloud.firestore {
 
     match /staff_members/{email} {
       allow get: if isVerifiedEmail() && isValidEmailKey(email) && (
-        email == myEmail() || isAdmin() || isKoordinator()
+        email == myEmail() ||
+        isAdmin() ||
+        (isKoordinator() && (resource == null || isEnumeratorUnderKoordinator(existing())))
       );
       allow list: if isVerifiedEmail() && (
         isAdmin() ||
@@ -316,14 +329,29 @@ service cloud.firestore {
       allow create: if isVerifiedEmail() && isValidEmailKey(email) && isValidStaffMember(incoming(), email) &&
         incoming().createdAt == request.time && (
           isAdmin() ||
-          (isKoordinator() && incoming().role == 'enumerator')
+          (
+            isKoordinator() &&
+            incoming().role == 'enumerator' &&
+            incoming().assignedRTs.size() >= 1 &&
+            incoming().assignedRTs.hasOnly(staffData().assignedRTs) &&
+            ('koordinatorEmail' in incoming()) &&
+            incoming().koordinatorEmail == myEmail()
+          )
         );
       allow update: if isVerifiedEmail() && isValidEmailKey(email) && isValidStaffMember(incoming(), email) &&
         incoming().createdAt == existing().createdAt &&
         incoming().createdBy == existing().createdBy &&
         incoming().email == existing().email && (
           isAdmin() ||
-          (isKoordinator() && existing().role == 'enumerator' && incoming().role == 'enumerator')
+          (
+            isKoordinator() &&
+            isEnumeratorUnderKoordinator(existing()) &&
+            incoming().role == 'enumerator' &&
+            incoming().assignedRTs.size() >= 1 &&
+            incoming().assignedRTs.hasOnly(staffData().assignedRTs) &&
+            ('koordinatorEmail' in incoming()) &&
+            incoming().koordinatorEmail == myEmail()
+          )
         );
       allow delete: if isAdmin() && isValidEmailKey(email) && email != 'arisriswanto057@gmail.com';
     }

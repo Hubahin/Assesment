@@ -17,6 +17,7 @@ import { DUSUN_LIST } from '../data/instrumentSpec';
 import {
   BOOTSTRAP_ADMIN_EMAIL,
   deleteStaffMember,
+  isEnumeratorUnderKoordinator,
   syncStaffMembersFromSpreadsheet,
   upsertStaffMember,
 } from '../services/firestoreService';
@@ -48,6 +49,10 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const isAdmin = profile.role === 'admin';
   const [showModal, setShowModal] = useState(false);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
+  const [editingKoordinatorEmail, setEditingKoordinatorEmail] = useState<string | undefined>(
+    undefined
+  );
+  const [externalRtCount, setExternalRtCount] = useState(0);
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>('enumerator');
@@ -62,6 +67,8 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const [sheetMsg, setSheetMsg] = useState<string | null>(null);
   const [sheetErr, setSheetErr] = useState<string | null>(null);
   const [sheetRowErrors, setSheetRowErrors] = useState<string[]>([]);
+
+  const koorRtSet = useMemo(() => new Set(profile.assignedRTs || []), [profile.assignedRTs]);
 
   const allRtsByDusun = useMemo(() => {
     const map = new Map<string, { rw: string; rts: string[] }[]>();
@@ -80,17 +87,55 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
     return map;
   }, [wilayah]);
 
+  const pickerRtsByDusun = useMemo(() => {
+    if (isAdmin) return allRtsByDusun;
+    const map = new Map<string, { rw: string; rts: string[] }[]>();
+    for (const d of DUSUN_LIST) {
+      const rwList = (allRtsByDusun.get(d.code) || [])
+        .map((rwItem) => ({
+          rw: rwItem.rw,
+          rts: rwItem.rts.filter((rt) => koorRtSet.has(rt)),
+        }))
+        .filter((rwItem) => rwItem.rts.length > 0);
+      map.set(d.code, rwList);
+    }
+    return map;
+  }, [isAdmin, allRtsByDusun, koorRtSet]);
+
+  const pickerDusuns = useMemo(() => {
+    if (isAdmin) return DUSUN_LIST;
+    return DUSUN_LIST.filter((d) => (pickerRtsByDusun.get(d.code) || []).length > 0);
+  }, [isAdmin, pickerRtsByDusun]);
+
+  const koorTerritoryGroups = useMemo(() => {
+    if (isAdmin) return [];
+    const groups: { dusun: string; rw: string; rts: string[] }[] = [];
+    for (const d of DUSUN_LIST) {
+      for (const rwItem of pickerRtsByDusun.get(d.code) || []) {
+        groups.push({ dusun: d.code, rw: rwItem.rw, rts: rwItem.rts });
+      }
+    }
+    return groups;
+  }, [isAdmin, pickerRtsByDusun]);
+
   const visibleStaff = useMemo(() => {
     if (isAdmin) return staffList;
-    return staffList.filter((s) => s.role === 'enumerator');
-  }, [isAdmin, staffList]);
+    return staffList.filter((s) => isEnumeratorUnderKoordinator(s, profile));
+  }, [isAdmin, staffList, profile]);
 
   const openCreate = () => {
     setEditingEmail(null);
+    setEditingKoordinatorEmail(undefined);
+    setExternalRtCount(0);
     setEmail('');
     setName('');
     setRole('enumerator');
-    setAssignedRTs([]);
+    if (!isAdmin && (profile.assignedRTs || []).length === 1) {
+      setAssignedRTs([...(profile.assignedRTs || [])]);
+    } else {
+      setAssignedRTs([]);
+    }
+    setRwPickerDusun(pickerDusuns[0]?.code || 'D1');
     setActive(true);
     setErrMsg(null);
     setShowModal(true);
@@ -98,27 +143,40 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
 
   const openEdit = (s: StaffMember) => {
     setEditingEmail(s.email);
+    setEditingKoordinatorEmail(s.koordinatorEmail);
     setEmail(s.email);
     setName(s.name);
     setRole(s.role);
-    setAssignedRTs(s.assignedRTs || []);
+    if (!isAdmin) {
+      const editableRts = (s.assignedRTs || []).filter((rt) => koorRtSet.has(rt));
+      setExternalRtCount((s.assignedRTs || []).length - editableRts.length);
+      setAssignedRTs(editableRts);
+      setRwPickerDusun(editableRts[0]?.split('-')[0] || pickerDusuns[0]?.code || 'D1');
+    } else {
+      setExternalRtCount(0);
+      setAssignedRTs(s.assignedRTs || []);
+      setRwPickerDusun(s.assignedRTs?.[0]?.split('-')[0] || 'D1');
+    }
     setActive(s.active);
     setErrMsg(null);
     setShowModal(true);
   };
 
   const toggleRt = (rtKey: string) => {
+    if (!isAdmin && !koorRtSet.has(rtKey)) return;
     setAssignedRTs((prev) =>
       prev.includes(rtKey) ? prev.filter((x) => x !== rtKey) : [...prev, rtKey]
     );
   };
 
   const toggleRwAll = (rts: string[]) => {
-    const allSelected = rts.every((r) => assignedRTs.includes(r));
+    const allowedRts = isAdmin ? rts : rts.filter((r) => koorRtSet.has(r));
+    if (allowedRts.length === 0) return;
+    const allSelected = allowedRts.every((r) => assignedRTs.includes(r));
     if (allSelected) {
-      setAssignedRTs((prev) => prev.filter((r) => !rts.includes(r)));
+      setAssignedRTs((prev) => prev.filter((r) => !allowedRts.includes(r)));
     } else {
-      setAssignedRTs((prev) => Array.from(new Set([...prev, ...rts])));
+      setAssignedRTs((prev) => Array.from(new Set([...prev, ...allowedRts])));
     }
   };
 
@@ -135,13 +193,36 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
     }
 
     const effectiveRole: UserRole = isAdmin ? role : 'enumerator';
-    const effectiveAssignedRTs = effectiveRole === 'admin' ? [] : assignedRTs;
+    const scopedSelectedRts = !isAdmin
+      ? assignedRTs.filter((rt) => koorRtSet.has(rt))
+      : assignedRTs;
+
+    if (!isAdmin) {
+      if (koorRtSet.size === 0) {
+        setErrMsg(
+          'Akun Koordinator Anda belum memiliki wilayah tugas (RW/RT). Hubungi Admin terlebih dahulu.'
+        );
+        return;
+      }
+      if (scopedSelectedRts.length === 0) {
+        setErrMsg(
+          'Pilih minimal 1 RT di dalam wilayah tugas Anda untuk Enumerator ini.'
+        );
+        return;
+      }
+    }
+
+    const effectiveAssignedRTs = effectiveRole === 'admin' ? [] : scopedSelectedRts;
     const savedStaff: StaffMember = {
       email: cleanEmail,
       name: name.trim(),
       role: effectiveRole,
       assignedRTs: effectiveAssignedRTs,
-      koordinatorEmail: !isAdmin ? profile.email : undefined,
+      koordinatorEmail: !isAdmin
+        ? profile.email.toLowerCase()
+        : effectiveRole === 'enumerator'
+        ? editingKoordinatorEmail
+        : undefined,
       active,
       createdBy: profile.email,
     };
@@ -211,7 +292,17 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
 
       setShowModal(false);
     } catch (err: any) {
-      setErrMsg(err?.message || 'Gagal menyimpan data petugas.');
+      const rawMsg = String(err?.message || '');
+      if (
+        rawMsg.includes('Missing or insufficient permissions') ||
+        rawMsg.includes('permission-denied')
+      ) {
+        setErrMsg(
+          'Izin Firestore ditolak: pastikan email tersebut belum terdaftar di wilayah/peran lain dan seluruh RT yang dipilih berada di dalam wilayah tugas Anda.'
+        );
+      } else {
+        setErrMsg(rawMsg || 'Gagal menyimpan data petugas.');
+      }
     } finally {
       setSaving(false);
     }
@@ -253,16 +344,19 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
         wilayah,
         actorEmail: profile.email,
         actorRole: profile.role,
+        actorAssignedRTs: profile.assignedRTs || [],
         replaceRemoved: isAdmin,
       });
       setSheetRowErrors(res.errors);
       if (res.emptySheet) {
         setSheetMsg(
-          'Tab "petugas" di Google Spreadsheet masih kosong. Klik "Kirim Daftar Petugas ke Tab \\"petugas\\"" untuk membuat contoh kolom & mengisi daftar awal.'
+          isAdmin
+            ? 'Tab "petugas" di Google Spreadsheet masih kosong. Klik "Kirim Daftar Petugas ke Tab \\"petugas\\"" untuk membuat contoh kolom & mengisi daftar awal.'
+            : 'Belum ada data Enumerator di tab "petugas" Spreadsheet yang termasuk wilayah tugas Anda.'
         );
       } else {
         setSheetMsg(
-          `Sinkronisasi dari Spreadsheet selesai (${res.totalSheetRows} baris dibaca): ${res.created} ditambahkan, ${res.updated} diperbarui, ${res.removed} dihapus/diganti emailnya, ${res.unchanged} sudah sesuai.`
+          `Sinkronisasi dari Spreadsheet selesai (${res.totalSheetRows} baris wilayah Anda dibaca): ${res.created} ditambahkan, ${res.updated} diperbarui, ${res.removed} dihapus/diganti emailnya, ${res.unchanged} sudah sesuai.`
         );
       }
     } catch (err: any) {
@@ -290,16 +384,18 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
         const { validRows } = parseSpreadsheetStaffRows(rawRows, wilayah);
         const mergedMap = new Map<string, StaffMember>();
         for (const r of validRows) {
-          if (r.role !== 'enumerator') {
-            mergedMap.set(r.email.toLowerCase(), {
-              email: r.email.toLowerCase(),
-              name: r.name,
-              role: r.role,
-              assignedRTs: r.assignedRTs,
-              koordinatorEmail: r.koordinatorEmail,
-              active: r.active,
-              createdBy: 'spreadsheet',
-            });
+          const sheetMember: StaffMember = {
+            email: r.email.toLowerCase(),
+            name: r.name,
+            role: r.role,
+            assignedRTs: r.assignedRTs,
+            koordinatorEmail: r.koordinatorEmail,
+            active: r.active,
+            createdBy: 'spreadsheet',
+          };
+          // Pertahankan Admin, Koordinator lain, dan Enumerator milik RW/Koordinator lain
+          if (r.role !== 'enumerator' || !isEnumeratorUnderKoordinator(sheetMember, profile)) {
+            mergedMap.set(sheetMember.email, sheetMember);
           }
         }
         for (const enumStaff of visibleStaff) {
@@ -311,7 +407,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
         await pushStaffToWebhook(spreadsheetConfig.webhookUrl, mergedList);
         onStaffSyncedToSheet?.();
         setSheetMsg(
-          `Berhasil mengirim ${visibleStaff.length} data Enumerator ke tab "petugas" di Google Spreadsheet tanpa menghapus baris Admin & Koordinator.`
+          `Berhasil mengirim ${visibleStaff.length} data Enumerator wilayah Anda ke tab "petugas" Google Spreadsheet tanpa menghapus baris Admin, Koordinator, maupun RW lainnya.`
         );
       }
     } catch (err: any) {
@@ -332,26 +428,57 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div>
-          <h2 className="text-lg font-extrabold text-slate-950">
-            {isAdmin ? 'Manajemen Petugas & Penugasan RT' : 'Kelola Enumerator'}
-          </h2>
-          <p className="text-xs text-slate-600">
-            {isAdmin
-              ? 'Admin dapat menambah/mengubah petugas langsung di aplikasi (email & role otomatis masuk ke tab "petugas" Spreadsheet) atau input massal lewat Google Spreadsheet.'
-              : 'Koordinator Enumerator dapat mendaftarkan Enumerator di aplikasi (otomatis masuk ke tab "petugas" Spreadsheet) maupun menarik pembaruan dari Spreadsheet.'}
-          </p>
+      <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-extrabold text-slate-950">
+              {isAdmin ? 'Manajemen Petugas & Penugasan RT' : 'Kelola Enumerator Wilayah Anda'}
+            </h2>
+            <p className="text-xs text-slate-600">
+              {isAdmin
+                ? 'Admin dapat menambah/mengubah petugas langsung di aplikasi (email & role otomatis masuk ke tab "petugas" Spreadsheet) atau input massal lewat Google Spreadsheet.'
+                : 'Anda hanya melihat dan mengelola Enumerator yang berada di bawah wilayah tugas Anda. Penambahan Enumerator dibatasi pada RW/RT tugas Anda.'}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={openCreate}
+            disabled={!isAdmin && koorRtSet.size === 0}
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-emerald-800 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-900 disabled:opacity-50"
+          >
+            <Plus className="h-4 w-4" />
+            <span>{isAdmin ? 'Tambah Petugas' : 'Tambah Enumerator'}</span>
+          </button>
         </div>
 
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-emerald-800 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-900"
-        >
-          <Plus className="h-4 w-4" />
-          <span>{isAdmin ? 'Tambah Petugas' : 'Tambah Enumerator'}</span>
-        </button>
+        {!isAdmin && (
+          <div
+            className={`rounded-xl border px-3.5 py-2.5 text-xs ${
+              koorRtSet.size === 0
+                ? 'border-amber-300 bg-amber-50 text-amber-950'
+                : 'border-sky-200 bg-sky-50 text-sky-950'
+            }`}
+          >
+            {koorRtSet.size === 0 ? (
+              <p className="font-semibold">
+                Wilayah tugas Koordinator Anda masih kosong. Hubungi Admin untuk menugaskan RW/RT agar Anda dapat menambah dan mengelola Enumerator.
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-bold">Wilayah Tugas Anda ({koorRtSet.size} RT):</span>
+                {koorTerritoryGroups.map((g) => (
+                  <span
+                    key={`${g.dusun}-${g.rw}`}
+                    className="rounded-lg border border-sky-300 bg-white px-2 py-0.5 font-mono text-[11px] font-bold text-sky-900"
+                  >
+                    {g.dusun} · RW {g.rw} ({g.rts.length} RT)
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Google Spreadsheet Bulk Staff Management Card */}
@@ -626,68 +753,89 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
               {role !== 'admin' && (
                 <div className="space-y-3 rounded-xl border border-slate-200 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs font-extrabold text-slate-900">
-                      Penugasan Wilayah RT ({assignedRTs.length} RT terpilih)
-                    </p>
-                    <div className="flex gap-1">
-                      {DUSUN_LIST.map((d) => (
-                        <button
-                          key={d.code}
-                          type="button"
-                          onClick={() => setRwPickerDusun(d.code)}
-                          className={`rounded-lg px-2.5 py-1 text-xs font-bold ${
-                            rwPickerDusun === d.code
-                              ? 'bg-emerald-800 text-white'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          {d.code}
-                        </button>
-                      ))}
+                    <div>
+                      <p className="text-xs font-extrabold text-slate-900">
+                        Penugasan Wilayah RT ({assignedRTs.length} RT terpilih)
+                      </p>
+                      {!isAdmin && (
+                        <p className="text-[11px] text-slate-500">
+                          Hanya menampilkan RT dalam wilayah tugas Koordinator Anda.
+                        </p>
+                      )}
                     </div>
+                    {pickerDusuns.length > 0 && (
+                      <div className="flex gap-1">
+                        {pickerDusuns.map((d) => (
+                          <button
+                            key={d.code}
+                            type="button"
+                            onClick={() => setRwPickerDusun(d.code)}
+                            className={`rounded-lg px-2.5 py-1 text-xs font-bold ${
+                              rwPickerDusun === d.code
+                                ? 'bg-emerald-800 text-white'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {d.code}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
-                  <div className="space-y-2.5">
-                    {(allRtsByDusun.get(rwPickerDusun) || []).map((rwItem) => {
-                      const allChecked = rwItem.rts.every((r) => assignedRTs.includes(r));
-                      return (
-                        <div key={rwItem.rw} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
-                          <div className="flex items-center justify-between gap-2 pb-2">
-                            <span className="font-mono text-xs font-bold text-slate-900">
-                              RW {rwItem.rw}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => toggleRwAll(rwItem.rts)}
-                              className="text-[11px] font-bold text-emerald-800 hover:underline"
-                            >
-                              {allChecked ? 'Batal Semua RW Ini' : 'Pilih Semua RW Ini'}
-                            </button>
+                  {!isAdmin && externalRtCount > 0 && (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-950">
+                      Enumerator ini sebelumnya memiliki {externalRtCount} RT di luar wilayah Anda. Menyimpan lewat Koordinator hanya akan menugaskan RT di wilayah Anda.
+                    </div>
+                  )}
+
+                  {(pickerRtsByDusun.get(rwPickerDusun) || []).length === 0 ? (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+                      Belum ada wilayah RW/RT yang ditugaskan untuk akun Anda. Hubungi Admin.
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {(pickerRtsByDusun.get(rwPickerDusun) || []).map((rwItem) => {
+                        const allChecked = rwItem.rts.every((r) => assignedRTs.includes(r));
+                        return (
+                          <div key={rwItem.rw} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                            <div className="flex items-center justify-between gap-2 pb-2">
+                              <span className="font-mono text-xs font-bold text-slate-900">
+                                RW {rwItem.rw}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => toggleRwAll(rwItem.rts)}
+                                className="text-[11px] font-bold text-emerald-800 hover:underline"
+                              >
+                                {allChecked ? 'Batal Semua RW Ini' : 'Pilih Semua RW Ini'}
+                              </button>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {rwItem.rts.map((rtKey) => {
+                                const checked = assignedRTs.includes(rtKey);
+                                const rtNum = rtKey.split('-')[2];
+                                return (
+                                  <button
+                                    key={rtKey}
+                                    type="button"
+                                    onClick={() => toggleRt(rtKey)}
+                                    className={`min-h-[36px] min-w-[54px] rounded-lg border px-2 py-1 font-mono text-xs font-bold transition ${
+                                      checked
+                                        ? 'border-emerald-800 bg-emerald-800 text-white'
+                                        : 'border-slate-300 bg-white text-slate-700'
+                                    }`}
+                                  >
+                                    RT {rtNum}
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {rwItem.rts.map((rtKey) => {
-                              const checked = assignedRTs.includes(rtKey);
-                              const rtNum = rtKey.split('-')[2];
-                              return (
-                                <button
-                                  key={rtKey}
-                                  type="button"
-                                  onClick={() => toggleRt(rtKey)}
-                                  className={`min-h-[36px] min-w-[54px] rounded-lg border px-2 py-1 font-mono text-xs font-bold transition ${
-                                    checked
-                                      ? 'border-emerald-800 bg-emerald-800 text-white'
-                                      : 'border-slate-300 bg-white text-slate-700'
-                                  }`}
-                                >
-                                  RT {rtNum}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 

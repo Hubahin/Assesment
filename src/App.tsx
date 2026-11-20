@@ -31,6 +31,7 @@ import {
   deleteSingleHouseholdRecord,
   ensureBootstrapSetup,
   flushOfflineSyncQueue,
+  isEnumeratorUnderKoordinator,
   saveSpreadsheetConfig,
   subscribeHouseholdPii,
   subscribeHouseholds,
@@ -197,7 +198,13 @@ export default function App() {
     if (cachedSheet) setSpreadsheetConfig(cachedSheet);
 
     const cachedStaff = loadUserCacheSlice(activeEmail, 'staffList');
-    if (cachedStaff) setStaffList(cachedStaff);
+    if (cachedStaff) {
+      setStaffList(
+        profile?.role === 'koordinator'
+          ? cachedStaff.filter((s) => isEnumeratorUnderKoordinator(s, profile))
+          : cachedStaff
+      );
+    }
 
     const cachedHh = loadUserCacheSlice(activeEmail, 'households');
     if (cachedHh) setHouseholds(cachedHh);
@@ -306,10 +313,10 @@ export default function App() {
         saveUserCacheSlice(emailLower, 'spreadsheetConfig', cfg);
         saveGlobalCacheSlice('spreadsheetConfig', cfg);
       }),
-      subscribeStaffList(profile.role, (list) => {
+      subscribeStaffList(profile, (list) => {
         setStaffList(list);
         saveUserCacheSlice(emailLower, 'staffList', list);
-        if (list.length > 0) {
+        if (profile.role === 'admin' && list.length > 0) {
           saveGlobalCacheSlice('staffList', list);
         }
       }),

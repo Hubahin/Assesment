@@ -288,24 +288,43 @@ export async function saveSpreadsheetConfig(
   }
 }
 
+export function isEnumeratorUnderKoordinator(
+  staff: Pick<StaffMember, 'role' | 'assignedRTs' | 'koordinatorEmail'>,
+  koordinator: Pick<StaffMember, 'email' | 'assignedRTs'>
+): boolean {
+  if (staff.role !== 'enumerator') return false;
+  const koorEmail = koordinator.email.trim().toLowerCase();
+  const staffKoor = (staff.koordinatorEmail || '').trim().toLowerCase();
+  if (staffKoor && staffKoor !== koorEmail) return false;
+
+  const koorRts = new Set(koordinator.assignedRTs || []);
+  const staffRts = staff.assignedRTs || [];
+  if (staffRts.some((rt) => koorRts.has(rt))) return true;
+
+  return Boolean(staffKoor && staffKoor === koorEmail && staffRts.length === 0);
+}
+
 export function subscribeStaffList(
-  role: UserRole,
+  actor: Pick<StaffMember, 'email' | 'role' | 'assignedRTs'>,
   onData: (staff: StaffMember[]) => void
 ): Unsubscribe {
-  if (role === 'enumerator') {
+  if (actor.role === 'enumerator') {
     onData([]);
     return () => {};
   }
   const colRef = collection(db, 'staff_members');
   const q =
-    role === 'admin'
+    actor.role === 'admin'
       ? colRef
       : query(colRef, where('role', '==', 'enumerator'));
 
   return onSnapshot(
     q,
     (snap) => {
-      const list = snap.docs.map((d) => d.data() as StaffMember);
+      let list = snap.docs.map((d) => d.data() as StaffMember);
+      if (actor.role === 'koordinator') {
+        list = list.filter((s) => isEnumeratorUnderKoordinator(s, actor));
+      }
       list.sort((a, b) => a.name.localeCompare(b.name, 'id'));
       onData(list);
     },
@@ -1457,6 +1476,7 @@ export async function syncStaffMembersFromSpreadsheet(params: {
   wilayah: WilayahConfig;
   actorEmail: string;
   actorRole: UserRole;
+  actorAssignedRTs?: string[];
   replaceRemoved?: boolean;
 }): Promise<StaffSyncResult> {
   const {
@@ -1464,15 +1484,23 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     wilayah,
     actorEmail,
     actorRole,
+    actorAssignedRTs = [],
     replaceRemoved = true,
   } = params;
 
   const rawRows = await fetchStaffFromWebhook(webhookUrl);
   const { validRows, errors } = parseSpreadsheetStaffRows(rawRows, wilayah);
 
+  const actorLower = actorEmail.trim().toLowerCase();
+  const actorRtSet = new Set(actorAssignedRTs);
   const scopedRows =
     actorRole === 'koordinator'
-      ? validRows.filter((r) => r.role === 'enumerator')
+      ? validRows.filter((r) => {
+          if (r.role !== 'enumerator') return false;
+          const rowKoor = (r.koordinatorEmail || '').trim().toLowerCase();
+          if (rowKoor && rowKoor !== actorLower) return false;
+          return r.assignedRTs.length > 0 && r.assignedRTs.every((rt) => actorRtSet.has(rt));
+        })
       : validRows;
 
   if (scopedRows.length === 0) {
@@ -1487,7 +1515,6 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     };
   }
 
-  const actorLower = actorEmail.trim().toLowerCase();
   const staffCol = collection(db, 'staff_members');
   const existingSnap = await getDocs(
     actorRole === 'admin' ? staffCol : query(staffCol, where('role', '==', 'enumerator'))
@@ -1495,7 +1522,17 @@ export async function syncStaffMembersFromSpreadsheet(params: {
 
   const existingMap = new Map<string, Record<string, any>>();
   for (const d of existingSnap.docs) {
-    existingMap.set(d.id.toLowerCase(), d.data());
+    const data = d.data() as StaffMember;
+    if (
+      actorRole === 'koordinator' &&
+      !isEnumeratorUnderKoordinator(data, {
+        email: actorLower,
+        assignedRTs: actorAssignedRTs,
+      })
+    ) {
+      continue;
+    }
+    existingMap.set(d.id.toLowerCase(), data);
   }
 
   type BatchOp =
