@@ -261,13 +261,22 @@ export default function App() {
         clearOfflineSession();
         setOfflineSession(null);
       } else if (staff && !staff.active && isOnline) {
-        saveOfflineSession({
+        const deactivatedSession: OfflineAuthSession = {
           email,
           displayName: user.displayName || staff.name,
           uid: user.uid,
           profile: staff,
           savedAt: new Date().toISOString(),
+        };
+        saveOfflineSession(deactivatedSession);
+        saveKnownAccount({
+          email,
+          displayName: user.displayName || staff.name,
+          uid: user.uid,
+          profile: staff,
+          lastSignedInAt: new Date().toISOString(),
         });
+        setKnownAccounts(loadKnownAccounts());
       }
     });
 
@@ -294,6 +303,9 @@ export default function App() {
       subscribeStaffList(profile.role, (list) => {
         setStaffList(list);
         saveUserCacheSlice(emailLower, 'staffList', list);
+        if (list.length > 0) {
+          saveGlobalCacheSlice('staffList', list);
+        }
       }),
       subscribeHouseholds(profile.role, profile.assignedRTs || [], (list) => {
         setHouseholds(list);
@@ -454,13 +466,9 @@ export default function App() {
     }
   };
 
-  const handleOfflineSignIn = (params: {
-    email: string;
-    name?: string;
-    selectedRTs?: string[];
-  }) => {
+  const handleOfflineSignIn = (params: { email: string }) => {
     const sess = createOfflineAuthSessionForEmail({
-      ...params,
+      email: params.email,
       bootstrapAdminEmail: BOOTSTRAP_ADMIN_EMAIL,
     });
     setOfflineSession(sess);
@@ -469,7 +477,7 @@ export default function App() {
     setToastMessage(
       sess.isProvisionalOffline
         ? `Masuk Mode Luring sebagai ${sess.email}. Data disimpan di perangkat dan akan dikirim setelah verifikasi Google saat online.`
-        : `Masuk Mode Luring dengan akun tersimpan (${sess.email}).`
+        : `Masuk Mode Luring dengan akun terdaftar (${sess.email}).`
     );
   };
 

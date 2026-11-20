@@ -11,8 +11,11 @@ import {
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { DEFAULT_RW_MAPPINGS_85 } from '../data/instrumentSpec';
-import { KnownAccountRecord, removeKnownAccount } from '../services/offlineStore';
+import {
+  findRegisteredOfflineAccount,
+  KnownAccountRecord,
+  removeKnownAccount,
+} from '../services/offlineStore';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface LoginViewProps {
@@ -22,11 +25,7 @@ interface LoginViewProps {
   knownAccounts: KnownAccountRecord[];
   bootstrapAdminEmail: string;
   onSignIn: () => Promise<void>;
-  onOfflineSignIn: (params: {
-    email: string;
-    name?: string;
-    selectedRTs?: string[];
-  }) => void;
+  onOfflineSignIn: (params: { email: string }) => void;
   onSignOut: () => Promise<void>;
   onKnownAccountsChanged: () => void;
   isOnline: boolean;
@@ -54,29 +53,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [unauthorizedHost, setUnauthorizedHost] = useState<string | null>(null);
 
-  const [showOfflineForm, setShowOfflineForm] = useState(!isOnline && knownAccounts.length === 0);
+  const activeKnownAccounts = useMemo(
+    () => knownAccounts.filter((a) => a.profile.active),
+    [knownAccounts]
+  );
+
+  const [showOfflineForm, setShowOfflineForm] = useState(!isOnline);
   const [offlineEmail, setOfflineEmail] = useState('');
-  const [offlineName, setOfflineName] = useState('');
-  const [selectedOfflineRt, setSelectedOfflineRt] = useState('D1-01-01');
   const [offlineFormErr, setOfflineFormErr] = useState<string | null>(null);
 
-  const allRtOptions = useMemo(() => {
-    const list: { rtKey: string; label: string }[] = [];
-    for (const m of DEFAULT_RW_MAPPINGS_85) {
-      for (let i = 1; i <= m.jumlahRt; i++) {
-        const rt = String(i).padStart(2, '0');
-        const rtKey = `${m.dusun}-${m.rw}-${rt}`;
-        list.push({ rtKey, label: `${m.dusun} · RW ${m.rw} · RT ${rt}` });
-      }
-    }
-    return list;
-  }, []);
-
-  const matchedKnownAccount = useMemo(() => {
+  const matchedRegisteredStaff = useMemo(() => {
     const clean = offlineEmail.trim().toLowerCase();
     if (!clean) return null;
-    return knownAccounts.find((a) => a.email.toLowerCase() === clean) || null;
-  }, [offlineEmail, knownAccounts]);
+    return findRegisteredOfflineAccount(clean);
+  }, [offlineEmail]);
 
   const isBootstrapOfflineEmail =
     offlineEmail.trim().toLowerCase() === bootstrapAdminEmail.toLowerCase();
@@ -86,8 +76,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
     setUnauthorizedHost(null);
 
     if (!isOnline) {
-      if (knownAccounts.length === 1) {
-        onOfflineSignIn({ email: knownAccounts[0].email });
+      if (activeKnownAccounts.length === 1 && !offlineEmail.trim()) {
+        try {
+          onOfflineSignIn({ email: activeKnownAccounts[0].email });
+        } catch (err: any) {
+          setOfflineFormErr(err?.message || 'Gagal masuk secara luring.');
+        }
         return;
       }
       setShowOfflineForm(true);
@@ -129,11 +123,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setOfflineFormErr('Masukkan alamat email Google yang valid (contoh: nama@gmail.com).');
       return;
     }
-    onOfflineSignIn({
-      email: cleanEmail,
-      name: offlineName.trim() || undefined,
-      selectedRTs: [selectedOfflineRt],
-    });
+    try {
+      onOfflineSignIn({ email: cleanEmail });
+    } catch (err: any) {
+      setOfflineFormErr(err?.message || 'Gagal masuk secara luring.');
+    }
   };
 
   return (
@@ -201,14 +195,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
         ) : (
           <div className="mt-6 space-y-4">
             {/* Saved Google Accounts for Instant 1-Tap Offline Login */}
-            {knownAccounts.length > 0 && !isOnline && (
+            {activeKnownAccounts.length > 0 && !isOnline && (
               <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5">
                 <p className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-950">
                   <UserCheck className="h-4 w-4 text-emerald-800" />
                   Akun Google Tersimpan di Perangkat
                 </p>
                 <div className="space-y-2">
-                  {knownAccounts.map((acc) => (
+                  {activeKnownAccounts.map((acc) => (
                     <div
                       key={acc.email}
                       className="flex items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-white p-2.5"
@@ -292,8 +286,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <span className="gsi-material-button-contents">
                   {loading
                     ? 'Menghubungkan...'
-                    : !isOnline && knownAccounts.length === 1
-                    ? `Masuk Luring (${knownAccounts[0].email})`
+                    : !isOnline && activeKnownAccounts.length === 1
+                    ? `Masuk Luring (${activeKnownAccounts[0].email})`
                     : !isOnline
                     ? 'Masuk dengan Email Google (Mode Luring)'
                     : 'Masuk dengan Google'}
@@ -303,23 +297,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
             {(!isOnline || showOfflineForm) && (
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-extrabold text-slate-900">
-                    Masuk Mode Luring dengan Email Google
-                  </p>
-                  {!showOfflineForm && (
-                    <button
-                      type="button"
-                      onClick={() => setShowOfflineForm(true)}
-                      className="text-xs font-bold text-emerald-800 underline"
-                    >
-                      Buka Form
-                    </button>
-                  )}
-                </div>
+                <p className="text-xs font-extrabold text-slate-900">
+                  Masuk Mode Luring dengan Email Terdaftar
+                </p>
 
-                {showOfflineForm && (
-                  <form onSubmit={handleOfflineSubmit} className="space-y-3">
+                <form onSubmit={handleOfflineSubmit} className="space-y-3">
                     <div>
                       <label className="block text-xs font-bold text-slate-700">
                         Email Akun Google <span className="text-rose-600">*</span>
@@ -328,56 +310,40 @@ export const LoginView: React.FC<LoginViewProps> = ({
                         type="email"
                         required
                         value={offlineEmail}
-                        onChange={(e) => setOfflineEmail(e.target.value)}
+                        onChange={(e) => {
+                          setOfflineEmail(e.target.value);
+                          setOfflineFormErr(null);
+                        }}
                         placeholder="contoh: arisriswanto058@gmail.com"
                         className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900"
                       />
                     </div>
 
-                    {(matchedKnownAccount || isBootstrapOfflineEmail) ? (
+                    {matchedRegisteredStaff && !matchedRegisteredStaff.active ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-900">
+                        <ShieldAlert className="h-4 w-4 shrink-0 text-rose-700" />
+                        <span>
+                          Akun ini tercatat nonaktif. Hubungi Admin atau Koordinator untuk
+                          mengaktifkannya kembali.
+                        </span>
+                      </div>
+                    ) : (matchedRegisteredStaff?.active || isBootstrapOfflineEmail) ? (
                       <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-900">
                         <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
                         <span>
-                          Akun dikenali di perangkat — peran &amp; wilayah RT tugas otomatis
-                          dimuat.
+                          Email terdaftar dikenali (
+                          {matchedRegisteredStaff?.name || 'Admin'} ·{' '}
+                          {ROLE_LABELS[matchedRegisteredStaff?.role || 'admin'] ||
+                            matchedRegisteredStaff?.role}
+                          ) — wilayah RT tugas otomatis dimuat.
                         </span>
                       </div>
                     ) : (
-                      <>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-700">
-                            Nama Petugas
-                          </label>
-                          <input
-                            type="text"
-                            value={offlineName}
-                            onChange={(e) => setOfflineName(e.target.value)}
-                            placeholder="Nama lengkap enumerator"
-                            className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-bold text-slate-700">
-                            Pilih RT Tugas (Sementara Saat Luring)
-                          </label>
-                          <select
-                            value={selectedOfflineRt}
-                            onChange={(e) => setSelectedOfflineRt(e.target.value)}
-                            className="mt-1 min-h-[42px] w-full rounded-xl border border-slate-300 bg-white px-3 font-mono text-xs font-bold text-slate-900"
-                          >
-                            {allRtOptions.map((o) => (
-                              <option key={o.rtKey} value={o.rtKey}>
-                                {o.label}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="mt-1 text-[11px] text-slate-500">
-                            Saat kembali online, login Google akan menyinkronkan data ini ke server
-                            &amp; Google Spreadsheet.
-                          </p>
-                        </div>
-                      </>
+                      <p className="text-[11px] leading-relaxed text-slate-600">
+                        Cukup masukkan alamat email Google Anda yang sudah didaftarkan oleh Admin
+                        atau Koordinator. Profil dan wilayah RT tugas akan diverifikasi otomatis
+                        saat perangkat kembali online.
+                      </p>
                     )}
 
                     {offlineFormErr && (
@@ -391,7 +357,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       Masuk &amp; Mulai Pendataan Luring
                     </button>
                   </form>
-                )}
               </div>
             )}
 

@@ -52,6 +52,7 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   onOpenQuestionnaire,
 }) => {
   const isAdmin = profile.role === 'admin';
+  const isProvisionalOffline = profile.createdBy === 'offline-provisional';
 
   // Build available RT options filtered by wilayah & user's assignedRTs
   const availableRtOptions = useMemo(() => {
@@ -60,13 +61,13 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
       for (let i = 1; i <= (m.jumlahRt || 0); i++) {
         const rtStr = String(i).padStart(2, '0');
         const rtKey = `${m.dusun}-${m.rw}-${rtStr}`;
-        if (isAdmin || profile.assignedRTs.includes(rtKey)) {
+        if (isAdmin || isProvisionalOffline || profile.assignedRTs.includes(rtKey)) {
           list.push({ rtKey, dusun: m.dusun, rw: m.rw, rt: rtStr });
         }
       }
     }
     return list;
-  }, [wilayah, isAdmin, profile.assignedRTs]);
+  }, [wilayah, isAdmin, isProvisionalOffline, profile.assignedRTs]);
 
   const [selectedDusun, setSelectedDusun] = useState<string>('');
   const [selectedRw, setSelectedRw] = useState<string>('');
@@ -267,8 +268,9 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
           <div>
             <h2 className="text-lg font-extrabold text-slate-950">Daftar Induk Rumah Tangga</h2>
             <p className="text-xs text-slate-600">
-              Pilih RT tugas, lalu pilih rumah tangga untuk mulai mencacah atau tambah via Mode
-              Listing.
+              {isProvisionalOffline
+                ? 'Mode luring sementara: pilih RT tugas Anda di bawah. Penugasan resmi akan diverifikasi otomatis saat kembali online.'
+                : 'Pilih RT tugas, lalu pilih rumah tangga untuk mulai mencacah atau tambah via Mode Listing.'}
             </p>
           </div>
           {activeRtMeta && (

@@ -162,15 +162,36 @@ export function removeKnownAccount(email: string): void {
   safeWriteJson(KNOWN_ACCOUNTS_KEY, next);
 }
 
+export function findRegisteredOfflineAccount(email: string): StaffMember | null {
+  const emailLower = email.trim().toLowerCase();
+  if (!emailLower) return null;
+
+  const known = loadKnownAccounts().find((a) => a.email.toLowerCase() === emailLower);
+  if (known) return known.profile;
+
+  const globalStaffList = loadGlobalCacheSlice<StaffMember[]>('staffList');
+  const globalMatch = globalStaffList?.find((s) => s.email.toLowerCase() === emailLower);
+  if (globalMatch) return globalMatch;
+
+  for (const ka of loadKnownAccounts()) {
+    const cachedStaffList = loadUserCacheSlice(ka.email, 'staffList');
+    const matched = cachedStaffList?.find((s) => s.email.toLowerCase() === emailLower);
+    if (matched) return matched;
+  }
+
+  return null;
+}
+
 export function createOfflineAuthSessionForEmail(params: {
   email: string;
-  name?: string;
-  selectedRTs?: string[];
   bootstrapAdminEmail?: string;
 }): OfflineAuthSession {
   const emailLower = params.email.trim().toLowerCase();
   const known = loadKnownAccounts().find((a) => a.email.toLowerCase() === emailLower);
-  if (known && known.profile.active) {
+  if (known) {
+    if (!known.profile.active) {
+      throw new Error('Akun petugas ini berstatus nonaktif. Hubungi Admin atau Koordinator.');
+    }
     const sess: OfflineAuthSession = {
       email: emailLower,
       displayName: known.displayName || known.profile.name,
@@ -183,33 +204,28 @@ export function createOfflineAuthSessionForEmail(params: {
     return sess;
   }
 
-  // Also check if another admin/koordinator on this device cached the staffList
-  const knownAccounts = loadKnownAccounts();
-  for (const ka of knownAccounts) {
-    const cachedStaffList = loadUserCacheSlice(ka.email, 'staffList');
-    const matched = cachedStaffList?.find(
-      (s) => s.email.toLowerCase() === emailLower && s.active
-    );
-    if (matched) {
-      const sess: OfflineAuthSession = {
-        email: emailLower,
-        displayName: matched.name,
-        uid: `offline_${emailLower}`,
-        profile: matched,
-        savedAt: new Date().toISOString(),
-        isProvisionalOffline: false,
-      };
-      saveOfflineSession(sess);
-      return sess;
+  const cachedStaff = findRegisteredOfflineAccount(emailLower);
+  if (cachedStaff) {
+    if (!cachedStaff.active) {
+      throw new Error('Akun petugas ini berstatus nonaktif. Hubungi Admin atau Koordinator.');
     }
+    const sess: OfflineAuthSession = {
+      email: emailLower,
+      displayName: cachedStaff.name,
+      uid: `offline_${emailLower}`,
+      profile: cachedStaff,
+      savedAt: new Date().toISOString(),
+      isProvisionalOffline: false,
+    };
+    saveOfflineSession(sess);
+    return sess;
   }
 
   const isBootstrapAdmin =
     params.bootstrapAdminEmail &&
     emailLower === params.bootstrapAdminEmail.toLowerCase();
 
-  const fallbackName =
-    params.name?.trim() || emailLower.split('@')[0] || 'Petugas Luring';
+  const fallbackName = emailLower.split('@')[0] || 'Petugas Luring';
 
   const profile: StaffMember = isBootstrapAdmin
     ? {
@@ -224,7 +240,7 @@ export function createOfflineAuthSessionForEmail(params: {
         email: emailLower,
         name: fallbackName,
         role: 'enumerator',
-        assignedRTs: params.selectedRTs && params.selectedRTs.length > 0 ? params.selectedRTs : [],
+        assignedRTs: [],
         active: true,
         createdBy: 'offline-provisional',
       };
@@ -241,11 +257,16 @@ export function createOfflineAuthSessionForEmail(params: {
   return sess;
 }
 
-export function saveGlobalCacheSlice(key: 'wilayah' | 'spreadsheetConfig', data: unknown): void {
+export function saveGlobalCacheSlice(
+  key: 'wilayah' | 'spreadsheetConfig' | 'staffList',
+  data: unknown
+): void {
   safeWriteJson(`${GLOBAL_CACHE_PREFIX}${key}`, data);
 }
 
-export function loadGlobalCacheSlice<T>(key: 'wilayah' | 'spreadsheetConfig'): T | null {
+export function loadGlobalCacheSlice<T>(
+  key: 'wilayah' | 'spreadsheetConfig' | 'staffList'
+): T | null {
   return safeReadJson<T>(`${GLOBAL_CACHE_PREFIX}${key}`);
 }
 
