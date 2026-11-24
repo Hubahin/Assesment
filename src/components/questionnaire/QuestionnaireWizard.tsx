@@ -12,7 +12,9 @@ import {
 } from 'lucide-react';
 import { CHOICES, TEKS_PERSETUJUAN } from '../../data/instrumentSpec';
 import {
+  formatFirestoreUserError,
   getHouseholdPhoto,
+  isFirestoreQuotaError,
   isOfflineOrTimeoutError,
   loadLocalDraft,
   markHouseholdSheetSynced,
@@ -273,7 +275,7 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
         );
         onSubmittedMessage(`Draf ${household.id_rt} tersimpan di perangkat & server.`);
       } catch (err) {
-        if (isOfflineOrTimeoutError(err)) {
+        if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) {
           await queueOfflineDraft({
             existingHousehold: household,
             draft,
@@ -281,7 +283,9 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
             actorName,
           });
           onSubmittedMessage(
-            `Koneksi lambat/terputus. Draf ${household.id_rt} disimpan lokal & masuk antrean sinkronisasi.`
+            isFirestoreQuotaError(err)
+              ? `Kuota tulis harian server penuh. Draf ${household.id_rt} disimpan aman di perangkat & masuk antrean sinkronisasi.`
+              : `Koneksi lambat/terputus. Draf ${household.id_rt} disimpan lokal & masuk antrean sinkronisasi.`
           );
         } else {
           throw err;
@@ -338,7 +342,7 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
           18000
         );
       } catch (err) {
-        if (isOfflineOrTimeoutError(err)) {
+        if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) {
           await queueOfflineSubmission({
             existingHousehold: household,
             draft,
@@ -352,7 +356,9 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
           });
           setShowSubmitConfirm(false);
           onSubmittedMessage(
-            `Jaringan tidak stabil. ${household.id_rt} disimpan di penyimpanan lokal & akan otomatis disinkronkan saat online.`
+            isFirestoreQuotaError(err)
+              ? `Kuota tulis harian server penuh. ${household.id_rt} disimpan aman di perangkat & akan otomatis terkirim ke server & Spreadsheet setelah kuota direset.`
+              : `Jaringan tidak stabil. ${household.id_rt} disimpan di penyimpanan lokal & akan otomatis disinkronkan saat online.`
           );
           onClose();
           return;
@@ -401,10 +407,10 @@ export const QuestionnaireWizard: React.FC<QuestionnaireWizardProps> = ({
       const rawMsg = err?.message || 'Gagal menyimpan data sensus.';
       if (rawMsg.includes('Missing or insufficient permissions')) {
         setSubmitError(
-          `Izin Firestore ditolak saat menyimpan (${household.rtKey}). Pastikan akun ${actorEmail} berstatus Aktif dan RT ${household.rtKey} sudah ditugaskan oleh Admin di menu Petugas, lalu muat ulang aplikasi. Detail: ${rawMsg}`
+          `Izin Firestore ditolak saat menyimpan (${household.rtKey}). Pastikan akun ${actorEmail} berstatus Aktif dan RT ${household.rtKey} sudah ditugaskan oleh Admin di menu Petugas, lalu muat ulang aplikasi.`
         );
       } else {
-        setSubmitError(rawMsg);
+        setSubmitError(formatFirestoreUserError(err, 'Gagal menyimpan data sensus.'));
       }
     } finally {
       setSubmitting(false);

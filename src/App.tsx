@@ -136,8 +136,10 @@ export default function App() {
   const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isSyncingQueue, setIsSyncingQueue] = useState(false);
+  const [quotaLimitedNotice, setQuotaLimitedNotice] = useState(false);
 
   const isSyncingRef = useRef(false);
+  const quotaCooldownUntilRef = useRef<number>(0);
   const syncedSheetIdsInSessionRef = useRef<Set<string>>(new Set());
   const lastAutoStaffSyncAtRef = useRef<number>(0);
   const isStaffSyncingRef = useRef<boolean>(false);
@@ -371,6 +373,9 @@ export default function App() {
       if (!isOnline || !user || !profile || !profile.active || isSyncingRef.current) {
         return;
       }
+      if (!manual && Date.now() < quotaCooldownUntilRef.current) {
+        return;
+      }
       const emailLower = (user.email || profile.email).toLowerCase();
       const currentQueue = loadOfflineQueue(emailLower);
       const hasUnsyncedSheet =
@@ -407,7 +412,19 @@ export default function App() {
         });
         setOfflineQueue(loadOfflineQueue(emailLower));
 
-        if (res.firestoreSyncedCount > 0 || res.sheetSyncedCount > 0) {
+        if (res.quotaExceeded) {
+          quotaCooldownUntilRef.current = Date.now() + 15 * 60 * 1000;
+          setQuotaLimitedNotice(true);
+          if (manual) {
+            setToastMessage(
+              'Kuota tulis harian server Firestore sedang penuh (reset otomatis besok). Enumerator tetap bisa mengisi formulir; data disimpan aman di perangkat.'
+            );
+          }
+        } else if (res.firestoreSyncedCount > 0 || res.sheetSyncedCount > 0) {
+          if (res.firestoreSyncedCount > 0) {
+            quotaCooldownUntilRef.current = 0;
+            setQuotaLimitedNotice(false);
+          }
           const parts: string[] = [];
           if (res.firestoreSyncedCount > 0) {
             parts.push(`${res.firestoreSyncedCount} data masuk ke database`);
@@ -770,6 +787,24 @@ export default function App() {
           </div>
         )}
 
+        {quotaLimitedNotice && (
+          <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-950">
+            <span>
+              Kuota tulis harian server Firestore sedang penuh (reset otomatis besok). Anda{' '}
+              <strong>tetap dapat menambah rumah tangga dan mengisi formulir</strong>—data disimpan
+              aman di perangkat dan akan tersinkron otomatis setelah kuota harian pulih.
+            </span>
+            <button
+              type="button"
+              onClick={() => setQuotaLimitedNotice(false)}
+              className="rounded-md p-1 text-amber-800 hover:bg-amber-100"
+              aria-label="Tutup pemberitahuan kuota"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
         {toastMessage && (
           <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-950 shadow-sm">
             <div className="flex items-center gap-2">
@@ -814,6 +849,7 @@ export default function App() {
                 onAdminDeleteHousehold={
                   profile.role === 'admin' && isOnline ? handleAdminDeleteHousehold : undefined
                 }
+                onNotice={(msg) => setToastMessage(msg)}
               />
             )}
 

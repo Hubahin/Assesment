@@ -90,6 +90,37 @@ export function isOfflineOrTimeoutError(err: unknown): boolean {
   );
 }
 
+export function isFirestoreQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('quota limit exceeded') ||
+    lower.includes('quota exceeded') ||
+    lower.includes('resource-exhausted') ||
+    lower.includes('free daily write units') ||
+    lower.includes('free daily read units')
+  );
+}
+
+export function formatFirestoreUserError(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  if (isFirestoreQuotaError(err)) {
+    return 'Kuota harian database Firestore sedang penuh (akan direset otomatis besok). Data disimpan aman di perangkat dan dapat disinkronkan setelah kuota pulih.';
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.error === 'string') {
+      if (isFirestoreQuotaError(parsed.error)) {
+        return 'Kuota harian database Firestore sedang penuh (akan direset otomatis besok). Data disimpan aman di perangkat.';
+      }
+      return parsed.error;
+    }
+  } catch {
+    // ignore non-JSON
+  }
+  return raw || fallback;
+}
+
 export function saveLocalDraft(draft: CensusDraft): void {
   const payload = { ...draft, updatedLocallyAt: new Date().toISOString() };
   try {
@@ -170,6 +201,10 @@ export async function ensureBootstrapSetup(userEmail: string, userName: string):
       });
     }
   } catch (error) {
+    if (isFirestoreQuotaError(error)) {
+      console.warn('Kuota Firestore tercapai saat bootstrap:', error);
+      return;
+    }
     handleFirestoreError(error, OperationType.WRITE, 'bootstrap');
   }
 }
@@ -206,12 +241,13 @@ export function subscribeMyStaffProfile(
       }
     },
     (err) => {
-      if (isOfflineOrTimeoutError(err)) {
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) {
         const cachedSession = loadOfflineSession();
         if (cachedSession && cachedSession.email.toLowerCase() === emailLower) {
           onData(cachedSession.profile);
           return;
         }
+        if (isFirestoreQuotaError(err)) return;
       }
       handleFirestoreError(err, OperationType.GET, `staff_members/${emailLower}`);
     }
@@ -234,7 +270,7 @@ export function subscribeWilayahConfig(onData: (cfg: WilayahConfig) => void): Un
       }
     },
     (err) => {
-      if (isOfflineOrTimeoutError(err)) return;
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) return;
       handleFirestoreError(err, OperationType.GET, 'config/wilayah');
     }
   );
@@ -267,7 +303,7 @@ export function subscribeSpreadsheetConfig(
       onData(snap.exists() ? (snap.data() as SpreadsheetConfig) : null);
     },
     (err) => {
-      if (isOfflineOrTimeoutError(err)) return;
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) return;
       handleFirestoreError(err, OperationType.GET, 'config/spreadsheet');
     }
   );
@@ -330,7 +366,7 @@ export function subscribeStaffList(
       onData(list);
     },
     (err) => {
-      if (isOfflineOrTimeoutError(err)) return;
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) return;
       handleFirestoreError(err, OperationType.LIST, 'staff_members');
     }
   );
@@ -402,7 +438,7 @@ function subscribeChunkedByRt<T>(
         onData(snap.docs.map((d) => d.data() as T));
       },
       (err) => {
-        if (isOfflineOrTimeoutError(err)) return;
+        if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) return;
         handleFirestoreError(err, OperationType.LIST, collectionName);
       }
     );
@@ -433,7 +469,7 @@ function subscribeChunkedByRt<T>(
         onData(merged);
       },
       (err) => {
-        if (isOfflineOrTimeoutError(err)) return;
+        if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) return;
         handleFirestoreError(err, OperationType.LIST, collectionName);
       }
     );
@@ -1121,7 +1157,12 @@ export async function flushOfflineSyncQueue(params: {
   piiRecords: HouseholdPiiRecord[];
   visits: VisitRecord[];
   syncedSheetIdsInSession?: Set<string>;
-}): Promise<{ firestoreSyncedCount: number; sheetSyncedCount: number; remainingCount: number }> {
+}): Promise<{
+  firestoreSyncedCount: number;
+  sheetSyncedCount: number;
+  remainingCount: number;
+  quotaExceeded: boolean;
+}> {
   const {
     actorEmail,
     actorRole,
@@ -1141,11 +1182,13 @@ export async function flushOfflineSyncQueue(params: {
       firestoreSyncedCount: 0,
       sheetSyncedCount: 0,
       remainingCount: initialQueue.length,
+      quotaExceeded: false,
     };
   }
 
   let firestoreSyncedCount = 0;
   let sheetSyncedCount = 0;
+  let quotaExceeded = false;
   const failedTempIds = new Set<string>();
   const processedSheetIds = new Set<string>();
 
@@ -1156,6 +1199,10 @@ export async function flushOfflineSyncQueue(params: {
     if (!item) continue;
 
     if (item.type === 'create_listing') {
+      if (quotaExceeded) {
+        failedTempIds.add(item.tempId);
+        continue;
+      }
       try {
         const created = await withNetworkTimeout(
           createHouseholdListingTransactional(item.params, item.actorEmail),
@@ -1165,6 +1212,7 @@ export async function flushOfflineSyncQueue(params: {
         removeOfflineQueueItem(emailLower, item.queueId);
         firestoreSyncedCount++;
       } catch (err) {
+        if (isFirestoreQuotaError(err)) quotaExceeded = true;
         console.warn('Gagal menyinkronkan listing luring:', err);
         failedTempIds.add(item.tempId);
       }
@@ -1176,6 +1224,7 @@ export async function flushOfflineSyncQueue(params: {
     }
 
     if (item.type === 'master_status') {
+      if (quotaExceeded) continue;
       try {
         await withNetworkTimeout(
           updateHouseholdMasterStatus(item.id_rt, item.status_daftar, item.catatan_daftar),
@@ -1184,12 +1233,14 @@ export async function flushOfflineSyncQueue(params: {
         removeOfflineQueueItem(emailLower, item.queueId);
         firestoreSyncedCount++;
       } catch (err) {
+        if (isFirestoreQuotaError(err)) quotaExceeded = true;
         console.warn('Gagal menyinkronkan status daftar luring:', err);
       }
       continue;
     }
 
     if (item.type === 'save_draft') {
+      if (quotaExceeded) continue;
       try {
         await withNetworkTimeout(
           saveHouseholdDraftRemote(
@@ -1203,6 +1254,7 @@ export async function flushOfflineSyncQueue(params: {
         removeOfflineQueueItem(emailLower, item.queueId);
         firestoreSyncedCount++;
       } catch (err) {
+        if (isFirestoreQuotaError(err)) quotaExceeded = true;
         console.warn('Gagal menyinkronkan draf luring:', err);
       }
       continue;
@@ -1214,6 +1266,7 @@ export async function flushOfflineSyncQueue(params: {
       let isSheetOk = item.sheetSynced;
 
       if (!isFirestoreOk) {
+        if (quotaExceeded) continue;
         try {
           const offlinePhoto = item.hasOfflinePhoto ? await getOfflinePhoto(item.id_rt) : null;
           await withNetworkTimeout(
@@ -1237,6 +1290,7 @@ export async function flushOfflineSyncQueue(params: {
             prev.type === 'submit_census' ? { ...prev, firestoreSynced: true } : prev
           );
         } catch (err) {
+          if (isFirestoreQuotaError(err)) quotaExceeded = true;
           console.warn('Gagal menyinkronkan pengiriman sensus ke Firestore:', err);
           continue;
         }
@@ -1337,6 +1391,7 @@ export async function flushOfflineSyncQueue(params: {
     firestoreSyncedCount,
     sheetSyncedCount,
     remainingCount: loadOfflineQueue(emailLower).length,
+    quotaExceeded,
   };
 }
 

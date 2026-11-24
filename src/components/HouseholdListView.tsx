@@ -16,6 +16,8 @@ import {
 } from '../data/instrumentSpec';
 import {
   createHouseholdListingTransactional,
+  formatFirestoreUserError,
+  isFirestoreQuotaError,
   isOfflineOrTimeoutError,
   loadLocalDraft,
   queueOfflineListing,
@@ -42,6 +44,7 @@ interface HouseholdListViewProps {
   pendingSyncIds: Set<string>;
   onOpenQuestionnaire: (h: HouseholdRecord) => void;
   onAdminDeleteHousehold?: (h: HouseholdRecord) => Promise<void>;
+  onNotice?: (message: string) => void;
 }
 
 export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
@@ -53,6 +56,7 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
   pendingSyncIds,
   onOpenQuestionnaire,
   onAdminDeleteHousehold,
+  onNotice,
 }) => {
   const isAdmin = profile.role === 'admin';
   const isProvisionalOffline = profile.createdBy === 'offline-provisional';
@@ -204,12 +208,17 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
       setLastBuildingNo(created.no_bangunan);
       setShowListingModal(false);
     } catch (err: any) {
-      if (isOfflineOrTimeoutError(err)) {
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) {
         const createdLocal = queueOfflineListing(listingParams, profile.email);
         setLastBuildingNo(createdLocal.no_bangunan);
         setShowListingModal(false);
+        if (isFirestoreQuotaError(err)) {
+          onNotice?.(
+            `Kuota tulis harian server penuh. Rumah tangga "${createdLocal.nama_kk_daftar}" disimpan aman di perangkat & sudah bisa langsung diisi kuesionernya; akan tersinkron otomatis setelah kuota direset.`
+          );
+        }
       } else {
-        setListingError(err?.message || 'Gagal menambahkan rumah tangga baru.');
+        setListingError(formatFirestoreUserError(err, 'Gagal menambahkan rumah tangga baru.'));
       }
     } finally {
       setListingSaving(false);
@@ -242,7 +251,7 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
       );
       setStatusModalTarget(null);
     } catch (err) {
-      if (isOfflineOrTimeoutError(err)) {
+      if (isOfflineOrTimeoutError(err) || isFirestoreQuotaError(err)) {
         queueOfflineMasterStatus(
           profile.email,
           statusModalTarget.id_rt,
@@ -250,6 +259,11 @@ export const HouseholdListView: React.FC<HouseholdListViewProps> = ({
           editCatatanDaftar
         );
         setStatusModalTarget(null);
+        if (isFirestoreQuotaError(err)) {
+          onNotice?.(
+            'Kuota tulis harian server penuh. Perubahan status daftar disimpan aman di perangkat & masuk antrean sinkronisasi.'
+          );
+        }
       }
     } finally {
       setSavingMasterStatus(false);
