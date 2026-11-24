@@ -22,8 +22,8 @@ import {
   upsertStaffMember,
 } from '../services/firestoreService';
 import {
-  fetchStaffFromWebhook,
-  parseSpreadsheetStaffRows,
+  pushKoordinatorStaffSafeToWebhook,
+  pushStaffDeleteSafeToWebhook,
   pushStaffToWebhook,
   pushStaffUpsertSafeToWebhook,
 } from '../services/googleSheetsService';
@@ -68,7 +68,16 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const [sheetErr, setSheetErr] = useState<string | null>(null);
   const [sheetRowErrors, setSheetRowErrors] = useState<string[]>([]);
 
+  // Delete Confirmation Modal State
+  const [deleteTarget, setDeleteTarget] = useState<StaffMember | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   const koorRtSet = useMemo(() => new Set(profile.assignedRTs || []), [profile.assignedRTs]);
+
+  const koordinatorOptions = useMemo(
+    () => staffList.filter((s) => s.role === 'koordinator' && s.active),
+    [staffList]
+  );
 
   const allRtsByDusun = useMemo(() => {
     const map = new Map<string, { rw: string; rts: string[] }[]>();
@@ -122,6 +131,17 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
     if (isAdmin) return staffList;
     return staffList.filter((s) => isEnumeratorUnderKoordinator(s, profile));
   }, [isAdmin, staffList, profile]);
+
+  const canDeleteStaff = (s: StaffMember): boolean => {
+    const targetLower = s.email.toLowerCase();
+    if (targetLower === BOOTSTRAP_ADMIN_EMAIL) return false;
+    if (targetLower === profile.email.toLowerCase()) return false;
+    if (isAdmin) return true;
+    if (profile.role !== 'koordinator') return false;
+    if (!isEnumeratorUnderKoordinator(s, profile)) return false;
+    const rts = s.assignedRTs || [];
+    return rts.length === 0 || rts.every((rt) => koorRtSet.has(rt));
+  };
 
   const openCreate = () => {
     setEditingEmail(null);
@@ -221,7 +241,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
       koordinatorEmail: !isAdmin
         ? profile.email.toLowerCase()
         : effectiveRole === 'enumerator'
-        ? editingKoordinatorEmail
+        ? editingKoordinatorEmail || undefined
         : undefined,
       active,
       createdBy: profile.email,
@@ -248,32 +268,15 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
 
       if (spreadsheetConfig?.webhookUrl && isOnline) {
         try {
-          const updatedAdminStaffList = isAdmin
-            ? (() => {
-                const exists = staffList.some(
-                  (s) => s.email.toLowerCase() === savedStaff.email
-                );
-                const next = exists
-                  ? staffList.map((s) =>
-                      s.email.toLowerCase() === savedStaff.email
-                        ? { ...s, ...savedStaff }
-                        : s
-                    )
-                  : [...staffList, savedStaff];
-                return [...next].sort((a, b) => a.name.localeCompare(b.name, 'id'));
-              })()
-            : undefined;
-
           await pushStaffUpsertSafeToWebhook({
             webhookUrl: spreadsheetConfig.webhookUrl,
             actorRole: profile.role,
             savedStaff,
-            updatedAdminStaffList,
             wilayah,
           });
           onStaffSyncedToSheet?.();
           setSheetMsg(
-            `Petugas "${savedStaff.name}" (${savedStaff.email} · role: ${savedStaff.role}) tersimpan di aplikasi dan otomatis dikirim ke tab "petugas" Google Spreadsheet.`
+            `Petugas "${savedStaff.name}" (${savedStaff.email} · role: ${savedStaff.role}) tersimpan di aplikasi dan otomatis dikirim ke tab "petugas" Google Spreadsheet tanpa mengubah wilayah petugas lain.`
           );
         } catch (sheetPushErr: any) {
           setSheetErr(
@@ -308,27 +311,52 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
     }
   };
 
-  const handleDelete = async (targetEmail: string) => {
-    if (!isAdmin || targetEmail === BOOTSTRAP_ADMIN_EMAIL) return;
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || !canDeleteStaff(deleteTarget)) return;
+    const targetEmail = deleteTarget.email.toLowerCase();
+    const targetName = deleteTarget.name;
+
+    setDeleting(true);
     setSheetMsg(null);
     setSheetErr(null);
-    await deleteStaffMember(targetEmail);
+    try {
+      await deleteStaffMember(targetEmail);
 
-    if (spreadsheetConfig?.webhookUrl && isOnline) {
-      try {
-        const remainingList = staffList.filter(
-          (s) => s.email.toLowerCase() !== targetEmail.toLowerCase()
-        );
-        await pushStaffToWebhook(spreadsheetConfig.webhookUrl, remainingList);
-        onStaffSyncedToSheet?.();
-        setSheetMsg(
-          `Petugas ${targetEmail} dihapus dari aplikasi dan tab "petugas" Google Spreadsheet telah diperbarui.`
-        );
-      } catch (sheetPushErr: any) {
-        setSheetErr(
-          `Petugas dihapus dari aplikasi, tetapi gagal memperbarui Spreadsheet: ${sheetPushErr?.message || 'Coba tekan Kirim Daftar Petugas secara manual.'}`
-        );
+      if (spreadsheetConfig?.webhookUrl && isOnline) {
+        try {
+          await pushStaffDeleteSafeToWebhook({
+            webhookUrl: spreadsheetConfig.webhookUrl,
+            targetEmail,
+          });
+          onStaffSyncedToSheet?.();
+          setSheetMsg(
+            `Petugas "${targetName}" (${targetEmail}) dihapus dari aplikasi dan barisnya di tab "petugas" Google Spreadsheet telah dihapus.`
+          );
+        } catch (sheetPushErr: any) {
+          setSheetErr(
+            `Petugas "${targetName}" dihapus dari aplikasi, tetapi gagal memperbarui Spreadsheet: ${sheetPushErr?.message || 'Pastikan kode Apps Script terbaru sudah di-Deploy.'}`
+          );
+        }
+      } else {
+        setSheetMsg(`Petugas "${targetName}" (${targetEmail}) berhasil dihapus dari aplikasi.`);
       }
+
+      setDeleteTarget(null);
+    } catch (err: any) {
+      const rawMsg = String(err?.message || '');
+      if (
+        rawMsg.includes('Missing or insufficient permissions') ||
+        rawMsg.includes('permission-denied')
+      ) {
+        setSheetErr(
+          'Izin hapus Firestore ditolak: pastikan Enumerator tersebut berada di dalam wilayah RW/RT tugas Anda.'
+        );
+      } else {
+        setSheetErr(rawMsg || 'Gagal menghapus data petugas.');
+      }
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -346,6 +374,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
         actorRole: profile.role,
         actorAssignedRTs: profile.assignedRTs || [],
         replaceRemoved: isAdmin,
+        preserveBlankRt: true,
       });
       setSheetRowErrors(res.errors);
       if (res.emptySheet) {
@@ -355,8 +384,12 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
             : 'Belum ada data Enumerator di tab "petugas" Spreadsheet yang termasuk wilayah tugas Anda.'
         );
       } else {
+        const preservedNote =
+          res.preservedRtCount > 0
+            ? ` (${res.preservedRtCount} akun mempertahankan tugas wilayah lama karena kolom rt_tugas kosong/perlu diperiksa)`
+            : '';
         setSheetMsg(
-          `Sinkronisasi dari Spreadsheet selesai (${res.totalSheetRows} baris wilayah Anda dibaca): ${res.created} ditambahkan, ${res.updated} diperbarui, ${res.removed} dihapus/diganti emailnya, ${res.unchanged} sudah sesuai.`
+          `Sinkronisasi dari Spreadsheet selesai (${res.totalSheetRows} baris dibaca): ${res.created} ditambahkan, ${res.updated} diperbarui, ${res.removed} dihapus/diganti emailnya, ${res.unchanged} sudah sesuai.${preservedNote}`
         );
       }
     } catch (err: any) {
@@ -380,40 +413,22 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
           `Berhasil mengirim ${visibleStaff.length} data petugas ke tab "petugas" di Google Spreadsheet. Sekarang Anda dapat mengedit, menambah massal, atau mengubah email langsung di tab tersebut.`
         );
       } else {
-        const rawRows = await fetchStaffFromWebhook(spreadsheetConfig.webhookUrl);
-        const { validRows } = parseSpreadsheetStaffRows(rawRows, wilayah);
-        const mergedMap = new Map<string, StaffMember>();
-        for (const r of validRows) {
-          const sheetMember: StaffMember = {
-            email: r.email.toLowerCase(),
-            name: r.name,
-            role: r.role,
-            assignedRTs: r.assignedRTs,
-            koordinatorEmail: r.koordinatorEmail,
-            active: r.active,
-            createdBy: 'spreadsheet',
-          };
-          // Pertahankan Admin, Koordinator lain, dan Enumerator milik RW/Koordinator lain
-          if (r.role !== 'enumerator' || !isEnumeratorUnderKoordinator(sheetMember, profile)) {
-            mergedMap.set(sheetMember.email, sheetMember);
-          }
-        }
-        for (const enumStaff of visibleStaff) {
-          mergedMap.set(enumStaff.email.toLowerCase(), enumStaff);
-        }
-        const mergedList = Array.from(mergedMap.values()).sort((a, b) =>
-          a.name.localeCompare(b.name, 'id')
-        );
-        await pushStaffToWebhook(spreadsheetConfig.webhookUrl, mergedList);
+        await pushKoordinatorStaffSafeToWebhook({
+          webhookUrl: spreadsheetConfig.webhookUrl,
+          koordinatorEmail: profile.email,
+          koordinatorAssignedRTs: profile.assignedRTs || [],
+          enumerators: visibleStaff,
+          wilayah,
+        });
         onStaffSyncedToSheet?.();
         setSheetMsg(
-          `Berhasil mengirim ${visibleStaff.length} data Enumerator wilayah Anda ke tab "petugas" Google Spreadsheet tanpa menghapus baris Admin, Koordinator, maupun RW lainnya.`
+          `Berhasil mengirim ${visibleStaff.length} data Enumerator wilayah Anda ke tab "petugas" Google Spreadsheet tanpa menghapus atau mereset wilayah Admin, Koordinator, maupun RW lainnya.`
         );
       }
     } catch (err: any) {
       setSheetErr(
         err?.message ||
-          'Gagal mengirim daftar petugas ke Google Spreadsheet. Jika masuk sebagai Koordinator, pastikan Apps Script sudah diperbarui agar mendukung fungsi baca (doGet) atau minta Admin mengirim daftar lengkap.'
+          'Gagal mengirim daftar petugas ke Google Spreadsheet. Pastikan URL Web App & kode Apps Script terbaru sudah di-Deploy.'
       );
     } finally {
       setSheetBusy(null);
@@ -528,9 +543,10 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
             <code>admin</code> · <strong>aktif</strong>: <code>ya</code> / <code>tidak</code>
           </p>
           <p>
-            • <strong>rt_tugas</strong>: pisahkan dengan koma (mis.{' '}
-            <code>D1-01-01, D1-01-02</code>) atau tulis kode RW untuk semua RT di RW tersebut (mis.{' '}
-            <code>D1-01</code>).
+            • <strong>rt_tugas</strong>: mendukung <code>D1-01-01, D1-01-02</code>, rentang{' '}
+            <code>D1-01-01 s/d D1-01-05</code>, kode RW <code>D1-01</code> atau <code>RW 01</code>.
+            Jika dikosongkan, penugasan RT yang sudah tersimpan di aplikasi tetap dipertahankan (tulis{' '}
+            <code>-</code> atau <code>KOSONG</code> untuk mengosongkan RT).
           </p>
         </div>
 
@@ -655,14 +671,15 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                   <Edit3 className="h-3.5 w-3.5" />
                   <span>Ubah</span>
                 </button>
-                {isAdmin && s.email !== BOOTSTRAP_ADMIN_EMAIL && (
+                {canDeleteStaff(s) && (
                   <button
                     type="button"
-                    onClick={() => handleDelete(s.email)}
-                    className="inline-flex min-h-[42px] items-center justify-center rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700 hover:bg-rose-100"
-                    title="Hapus petugas"
+                    onClick={() => setDeleteTarget(s)}
+                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-100"
+                    title={isAdmin ? 'Hapus petugas' : 'Hapus enumerator wilayah Anda'}
                   >
                     <Trash2 className="h-4 w-4" />
+                    <span className="hidden sm:inline">Hapus</span>
                   </button>
                 )}
               </div>
@@ -737,6 +754,26 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {isAdmin && role === 'enumerator' && koordinatorOptions.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-800">
+                    Koordinator Wilayah Pembina (Opsional)
+                  </label>
+                  <select
+                    value={editingKoordinatorEmail || ''}
+                    onChange={(e) => setEditingKoordinatorEmail(e.target.value || undefined)}
+                    className="mt-1.5 min-h-[44px] w-full rounded-xl border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-900"
+                  >
+                    <option value="">Otomatis sesuai wilayah RT tugas</option>
+                    {koordinatorOptions.map((k) => (
+                      <option key={k.email} value={k.email.toLowerCase()}>
+                        {k.name} ({k.email})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               )}
 
@@ -864,6 +901,46 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Delete Staff Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-300 bg-white p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 text-rose-700">
+              <AlertTriangle className="h-5 w-5 shrink-0" />
+              <h3 className="text-lg font-extrabold text-slate-950">
+                {isAdmin ? 'Hapus Akun Petugas?' : 'Hapus Enumerator Wilayah Anda?'}
+              </h3>
+            </div>
+            <p className="text-sm leading-relaxed text-slate-700">
+              Anda akan menghapus <strong>{deleteTarget.name}</strong> (
+              <span className="font-mono text-xs">{deleteTarget.email}</span>) dari daftar petugas
+              {spreadsheetConfig?.webhookUrl && isOnline
+                ? ' serta menghapus barisnya dari tab "petugas" Google Spreadsheet.'
+                : '.'}
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+                className="min-h-[44px] rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={handleConfirmDelete}
+                className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>{deleting ? 'Menghapus...' : 'Ya, Hapus Petugas'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

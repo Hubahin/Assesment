@@ -43,7 +43,10 @@ import {
   subscribeWilayahConfig,
   syncStaffMembersFromSpreadsheet,
 } from './services/firestoreService';
-import { syncAllDataViaWebhook } from './services/googleSheetsService';
+import {
+  isHouseholdSubmittedForSheet,
+  syncAllDataViaWebhook,
+} from './services/googleSheetsService';
 import {
   applyOfflineQueueOverlay,
   clearOfflineSession,
@@ -359,7 +362,8 @@ export default function App() {
   const pendingSyncIds = overlayed.pendingSyncIds;
 
   const pendingSheetCount = useMemo(() => {
-    return effectiveHouseholds.filter((h) => h.submittedAt && !h.sheetSynced).length;
+    return effectiveHouseholds.filter((h) => isHouseholdSubmittedForSheet(h) && !h.sheetSynced)
+      .length;
   }, [effectiveHouseholds]);
 
   const runSyncNow = useCallback(
@@ -373,7 +377,7 @@ export default function App() {
         Boolean(spreadsheetConfig?.webhookUrl) &&
         households.some(
           (h) =>
-            h.submittedAt &&
+            isHouseholdSubmittedForSheet(h) &&
             !h.sheetSynced &&
             !syncedSheetIdsInSessionRef.current.has(h.id_rt) &&
             (profile.role === 'admin' ||
@@ -435,7 +439,7 @@ export default function App() {
       Boolean(spreadsheetConfig?.webhookUrl) &&
       households.some(
         (h) =>
-          h.submittedAt &&
+          isHouseholdSubmittedForSheet(h) &&
           !h.sheetSynced &&
           !syncedSheetIdsInSessionRef.current.has(h.id_rt) &&
           (profile.role === 'admin' ||
@@ -460,7 +464,7 @@ export default function App() {
 
     const runAutoStaffSync = async () => {
       const now = Date.now();
-      if (isStaffSyncingRef.current || now - lastAutoStaffSyncAtRef.current < 25000) return;
+      if (isStaffSyncingRef.current || now - lastAutoStaffSyncAtRef.current < 45000) return;
       isStaffSyncingRef.current = true;
       lastAutoStaffSyncAtRef.current = now;
       try {
@@ -469,12 +473,13 @@ export default function App() {
           wilayah,
           actorEmail: profile.email,
           actorRole: profile.role,
-          replaceRemoved: true,
+          replaceRemoved: false,
+          preserveBlankRt: true,
         });
-        const totalChanges = res.created + res.updated + res.removed;
+        const totalChanges = res.created + res.updated;
         if (!res.emptySheet && totalChanges > 0) {
           setToastMessage(
-            `Daftar petugas otomatis disinkronkan dari Spreadsheet (${res.created} baru, ${res.updated} diperbarui, ${res.removed} dihapus).`
+            `Daftar petugas otomatis disinkronkan dari Spreadsheet (${res.created} baru, ${res.updated} diperbarui).`
           );
         }
       } catch {

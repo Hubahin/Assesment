@@ -353,7 +353,15 @@ service cloud.firestore {
             incoming().koordinatorEmail == myEmail()
           )
         );
-      allow delete: if isAdmin() && isValidEmailKey(email) && email != 'arisriswanto057@gmail.com';
+      allow delete: if isVerifiedEmail() && isValidEmailKey(email) && email != 'arisriswanto057@gmail.com' && (
+        isAdmin() ||
+        (
+          isKoordinator() &&
+          email != myEmail() &&
+          isEnumeratorUnderKoordinator(existing()) &&
+          (existing().assignedRTs.size() == 0 || existing().assignedRTs.hasOnly(staffData().assignedRTs))
+        )
+      );
     }
 
     match /rt_counters/{rtKey} {

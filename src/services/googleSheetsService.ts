@@ -33,19 +33,19 @@ export const APPS_SCRIPT_TEMPLATE = `function doGet(e) {
         sheet.appendRow(headers);
         sheet.setFrozenRows(1);
         return ContentService
-          .createTextOutput(JSON.stringify({ ok: true, petugas: [] }))
+          .createTextOutput(JSON.stringify({ ok: true, version: 2, supportsPetugasOps: true, petugas: [] }))
           .setMimeType(ContentService.MimeType.JSON);
       }
 
       var values = sheet.getDataRange().getValues();
       if (values.length <= 1) {
         return ContentService
-          .createTextOutput(JSON.stringify({ ok: true, petugas: [] }))
+          .createTextOutput(JSON.stringify({ ok: true, version: 2, supportsPetugasOps: true, petugas: [] }))
           .setMimeType(ContentService.MimeType.JSON);
       }
 
       var colHeaders = values[0].map(function(h) {
-        return String(h || '').trim().toLowerCase();
+        return String(h || '').trim().toLowerCase().replace(/\\s+/g, '_');
       });
       var rows = [];
       for (var i = 1; i < values.length; i++) {
@@ -62,7 +62,7 @@ export const APPS_SCRIPT_TEMPLATE = `function doGet(e) {
       }
 
       return ContentService
-        .createTextOutput(JSON.stringify({ ok: true, petugas: rows }))
+        .createTextOutput(JSON.stringify({ ok: true, version: 2, supportsPetugasOps: true, petugas: rows }))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -77,10 +77,71 @@ export const APPS_SCRIPT_TEMPLATE = `function doGet(e) {
 }
 
 function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(15000);
   try {
     var payload = JSON.parse(e.postData.contents);
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var mode = payload.mode || 'append';
+
+    if (mode === 'upsert_petugas' && payload.petugasRow) {
+      var headers = ['email', 'nama', 'role', 'rt_tugas', 'aktif', 'koordinator_email'];
+      var pSheet = ss.getSheetByName('petugas') || ss.insertSheet('petugas');
+      if (pSheet.getLastRow() === 0) {
+        pSheet.appendRow(headers);
+        pSheet.setFrozenRows(1);
+      }
+      var targetEmail = String(payload.petugasRow[0] || '').trim().toLowerCase();
+      var pValues = pSheet.getDataRange().getValues();
+      var emailCol = 0;
+      if (pValues.length > 0) {
+        for (var hc = 0; hc < pValues[0].length; hc++) {
+          if (String(pValues[0][hc] || '').trim().toLowerCase() === 'email') {
+            emailCol = hc;
+            break;
+          }
+        }
+      }
+      var updated = false;
+      for (var r = 1; r < pValues.length; r++) {
+        var rowEmail = String(pValues[r][emailCol] || '').trim().toLowerCase();
+        if (rowEmail === targetEmail && targetEmail) {
+          pSheet.getRange(r + 1, 1, 1, payload.petugasRow.length).setValues([payload.petugasRow]);
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) {
+        pSheet.appendRow(payload.petugasRow);
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (mode === 'delete_petugas' && payload.email) {
+      var delSheet = ss.getSheetByName('petugas');
+      if (delSheet && delSheet.getLastRow() > 1) {
+        var delEmail = String(payload.email || '').trim().toLowerCase();
+        var delValues = delSheet.getDataRange().getValues();
+        var delEmailCol = 0;
+        for (var dc = 0; dc < delValues[0].length; dc++) {
+          if (String(delValues[0][dc] || '').trim().toLowerCase() === 'email') {
+            delEmailCol = dc;
+            break;
+          }
+        }
+        for (var dr = delValues.length - 1; dr >= 1; dr--) {
+          if (String(delValues[dr][delEmailCol] || '').trim().toLowerCase() === delEmail) {
+            delSheet.deleteRow(dr + 1);
+          }
+        }
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     var tables = payload.tables || {};
     var tabNames = ['rumah_tangga', 'anggota', 'identitas', 'kunjungan', 'log_revisi', 'petugas'];
 
@@ -114,6 +175,8 @@ function doPost(e) {
     return ContentService
       .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
       .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
   }
 }`;
 
@@ -141,6 +204,14 @@ async function postWebhookPayload(webhookUrl: string, payload: unknown): Promise
   });
 }
 
+export function isHouseholdSubmittedForSheet(h: HouseholdRecord): boolean {
+  return (
+    Boolean(h.submittedAt) &&
+    h.status_cacah !== 'draf' &&
+    h.status_cacah !== 'belum_dikunjungi'
+  );
+}
+
 export async function appendSubmissionViaWebhook(params: {
   webhookUrl: string;
   household: HouseholdRecord;
@@ -148,6 +219,9 @@ export async function appendSubmissionViaWebhook(params: {
   visit: VisitRecord;
 }): Promise<void> {
   const { webhookUrl, household, pii, visit } = params;
+  if (!isHouseholdSubmittedForSheet(household)) {
+    return;
+  }
   const rtTable = buildRumahTanggaTable([household]);
   const angTable = buildAnggotaTable([household]);
   const idTable = buildIdentitasTable([pii]);
@@ -172,15 +246,20 @@ export async function syncAllDataViaWebhook(params: {
   revisionLogs: RevisionLogRecord[];
 }): Promise<void> {
   const { webhookUrl, households, piiRecords, visits, revisionLogs } = params;
+  const submittedHouseholds = households.filter(isHouseholdSubmittedForSheet);
+  const submittedIds = new Set(submittedHouseholds.map((h) => h.id_rt));
+  const submittedPii = piiRecords.filter((p) => submittedIds.has(p.id_rt));
+  const submittedVisits = visits.filter((v) => submittedIds.has(v.id_rt));
+  const submittedLogs = revisionLogs.filter((l) => submittedIds.has(l.id_rt));
 
   await postWebhookPayload(webhookUrl, {
     mode: 'replace_all',
     tables: {
-      rumah_tangga: buildRumahTanggaTable(households),
-      anggota: buildAnggotaTable(households),
-      identitas: buildIdentitasTable(piiRecords),
-      kunjungan: buildKunjunganTable(visits),
-      log_revisi: buildLogRevisiTable(revisionLogs),
+      rumah_tangga: buildRumahTanggaTable(submittedHouseholds),
+      anggota: buildAnggotaTable(submittedHouseholds),
+      identitas: buildIdentitasTable(submittedPii),
+      kunjungan: buildKunjunganTable(submittedVisits),
+      log_revisi: buildLogRevisiTable(submittedLogs),
     },
   });
 }
@@ -212,20 +291,86 @@ export interface SpreadsheetPetugasRawRow {
   [key: string]: string | undefined;
 }
 
-export function buildPetugasTable(staffList: StaffMember[]): {
-  headers: string[];
-  rows: string[][];
-} {
-  const headers = ['email', 'nama', 'role', 'rt_tugas', 'aktif', 'koordinator_email'];
-  const rows = staffList.map((s) => [
+export const PETUGAS_HEADERS = [
+  'email',
+  'nama',
+  'role',
+  'rt_tugas',
+  'aktif',
+  'koordinator_email',
+];
+
+function staffToPetugasRow(s: StaffMember): string[] {
+  return [
     s.email.toLowerCase(),
     s.name,
     s.role,
     s.role === 'admin' ? '' : (s.assignedRTs || []).join(', '),
     s.active ? 'ya' : 'tidak',
     s.koordinatorEmail || '',
-  ]);
-  return { headers, rows };
+  ];
+}
+
+export function buildPetugasTable(staffList: StaffMember[]): {
+  headers: string[];
+  rows: string[][];
+} {
+  return {
+    headers: PETUGAS_HEADERS,
+    rows: staffList.map(staffToPetugasRow),
+  };
+}
+
+function normalizeRawRowFields(raw: SpreadsheetPetugasRawRow): Record<string, string> {
+  const norm: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw || {})) {
+    const cleanKey = k
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    if (cleanKey) {
+      norm[cleanKey] = v === undefined || v === null ? '' : String(v);
+    }
+  }
+  return norm;
+}
+
+function pickRawField(norm: Record<string, string>, candidates: string[]): string {
+  for (const c of candidates) {
+    if (norm[c] !== undefined) return norm[c];
+  }
+  return '';
+}
+
+function rawRowToPreservedPetugasRow(raw: SpreadsheetPetugasRawRow): string[] | null {
+  const norm = normalizeRawRowFields(raw);
+  const email = pickRawField(norm, ['email', 'e_mail', 'alamat_email']).trim().toLowerCase();
+  if (!email) return null;
+  const nama = pickRawField(norm, ['nama', 'name', 'nama_lengkap']).trim() || email.split('@')[0];
+  const role = pickRawField(norm, ['role', 'peran', 'jabatan']).trim().toLowerCase() || 'enumerator';
+  const rtTugas = pickRawField(norm, [
+    'rt_tugas',
+    'wilayah_tugas',
+    'wilayah',
+    'tugas_rt',
+    'penugasan_rt',
+    'assignedrts',
+    'assigned_rts',
+    'rt',
+    'rw',
+  ]).trim();
+  const aktif = pickRawField(norm, ['aktif', 'active', 'status']).trim() || 'ya';
+  const koordinatorEmail = pickRawField(norm, [
+    'koordinator_email',
+    'koordinatoremail',
+    'email_koordinator',
+    'koordinator',
+  ])
+    .trim()
+    .toLowerCase();
+
+  return [email, nama, role, rtTugas, aktif, koordinatorEmail];
 }
 
 export async function pushStaffToWebhook(
@@ -240,40 +385,56 @@ export async function pushStaffToWebhook(
   });
 }
 
+export async function pushStaffRowsRawToWebhook(
+  webhookUrl: string,
+  rows: string[][]
+): Promise<void> {
+  await postWebhookPayload(webhookUrl, {
+    mode: 'replace_all',
+    tables: {
+      petugas: {
+        headers: PETUGAS_HEADERS,
+        rows,
+      },
+    },
+  });
+}
+
 export async function pushStaffUpsertSafeToWebhook(params: {
   webhookUrl: string;
-  actorRole: UserRole;
+  actorRole?: UserRole;
   savedStaff: StaffMember;
   updatedAdminStaffList?: StaffMember[];
-  wilayah: WilayahConfig;
+  wilayah?: WilayahConfig;
 }): Promise<void> {
-  const { webhookUrl, actorRole, savedStaff, updatedAdminStaffList, wilayah } = params;
-
-  if (actorRole === 'admin' && updatedAdminStaffList) {
-    await pushStaffToWebhook(webhookUrl, updatedAdminStaffList);
-    return;
-  }
+  const { webhookUrl, savedStaff } = params;
+  const targetEmail = savedStaff.email.trim().toLowerCase();
+  const newRow = staffToPetugasRow(savedStaff);
 
   try {
-    const rawRows = await fetchStaffFromWebhook(webhookUrl);
-    const { validRows } = parseSpreadsheetStaffRows(rawRows, wilayah);
-    const mergedMap = new Map<string, StaffMember>();
-    for (const r of validRows) {
-      mergedMap.set(r.email.toLowerCase(), {
-        email: r.email.toLowerCase(),
-        name: r.name,
-        role: r.role,
-        assignedRTs: r.assignedRTs,
-        koordinatorEmail: r.koordinatorEmail,
-        active: r.active,
-        createdBy: 'spreadsheet',
+    const meta = await fetchStaffMetaFromWebhook(webhookUrl);
+    if (meta.supportsPetugasOps) {
+      await postWebhookPayload(webhookUrl, {
+        mode: 'upsert_petugas',
+        petugasRow: newRow,
       });
+      return;
     }
-    mergedMap.set(savedStaff.email.toLowerCase(), savedStaff);
-    const mergedList = Array.from(mergedMap.values()).sort((a, b) =>
-      a.name.localeCompare(b.name, 'id')
+
+    // Fallback aman untuk Apps Script versi lama: pertahankan kolom rt_tugas asli milik baris lain tanpa reset
+    const mergedMap = new Map<string, string[]>();
+    for (const raw of meta.petugas) {
+      const preserved = rawRowToPreservedPetugasRow(raw);
+      if (preserved && preserved[0]) {
+        mergedMap.set(preserved[0], preserved);
+      }
+    }
+    mergedMap.set(targetEmail, newRow);
+
+    const rows = Array.from(mergedMap.values()).sort((a, b) =>
+      a[1].localeCompare(b[1], 'id')
     );
-    await pushStaffToWebhook(webhookUrl, mergedList);
+    await pushStaffRowsRawToWebhook(webhookUrl, rows);
   } catch {
     await postWebhookPayload(webhookUrl, {
       mode: 'append',
@@ -284,9 +445,83 @@ export async function pushStaffUpsertSafeToWebhook(params: {
   }
 }
 
-export async function fetchStaffFromWebhook(
+export async function pushStaffDeleteSafeToWebhook(params: {
+  webhookUrl: string;
+  targetEmail: string;
+}): Promise<void> {
+  const targetEmail = params.targetEmail.trim().toLowerCase();
+  const meta = await fetchStaffMetaFromWebhook(params.webhookUrl);
+
+  if (meta.supportsPetugasOps) {
+    await postWebhookPayload(params.webhookUrl, {
+      mode: 'delete_petugas',
+      email: targetEmail,
+    });
+    return;
+  }
+
+  // Fallback aman untuk Apps Script versi lama: hapus hanya 1 email & pertahankan baris lain apa adanya
+  const remainingRows: string[][] = [];
+  for (const raw of meta.petugas) {
+    const preserved = rawRowToPreservedPetugasRow(raw);
+    if (preserved && preserved[0] && preserved[0] !== targetEmail) {
+      remainingRows.push(preserved);
+    }
+  }
+  await pushStaffRowsRawToWebhook(params.webhookUrl, remainingRows);
+}
+
+export async function pushKoordinatorStaffSafeToWebhook(params: {
+  webhookUrl: string;
+  koordinatorEmail: string;
+  koordinatorAssignedRTs: string[];
+  enumerators: StaffMember[];
+  wilayah: WilayahConfig;
+}): Promise<void> {
+  const { webhookUrl, koordinatorEmail, koordinatorAssignedRTs, enumerators, wilayah } = params;
+  const koorLower = koordinatorEmail.trim().toLowerCase();
+  const koorRtSet = new Set(koordinatorAssignedRTs);
+
+  const meta = await fetchStaffMetaFromWebhook(webhookUrl);
+  const { validRows } = parseSpreadsheetStaffRows(meta.petugas, wilayah);
+  const parsedByEmail = new Map(validRows.map((r) => [r.email.toLowerCase(), r]));
+
+  const mergedMap = new Map<string, string[]>();
+  for (const raw of meta.petugas) {
+    const preserved = rawRowToPreservedPetugasRow(raw);
+    if (!preserved || !preserved[0]) continue;
+    const rowEmail = preserved[0];
+    const parsed = parsedByEmail.get(rowEmail);
+
+    const isOtherOrProtected =
+      !parsed ||
+      parsed.role !== 'enumerator' ||
+      (parsed.koordinatorEmail && parsed.koordinatorEmail !== koorLower) ||
+      (parsed.hasRtError) ||
+      (!parsed.assignedRTs.some((rt) => koorRtSet.has(rt)) &&
+        parsed.koordinatorEmail !== koorLower);
+
+    if (isOtherOrProtected) {
+      mergedMap.set(rowEmail, preserved);
+    }
+  }
+
+  for (const enumStaff of enumerators) {
+    mergedMap.set(enumStaff.email.toLowerCase(), staffToPetugasRow(enumStaff));
+  }
+
+  const rows = Array.from(mergedMap.values()).sort((a, b) => a[1].localeCompare(b[1], 'id'));
+  await pushStaffRowsRawToWebhook(webhookUrl, rows);
+}
+
+export interface FetchStaffWebhookResult {
+  petugas: SpreadsheetPetugasRawRow[];
+  supportsPetugasOps: boolean;
+}
+
+export async function fetchStaffMetaFromWebhook(
   webhookUrl: string
-): Promise<SpreadsheetPetugasRawRow[]> {
+): Promise<FetchStaffWebhookResult> {
   if (!isValidAppsScriptUrl(webhookUrl)) {
     throw new Error('URL Google Apps Script Web App tidak valid (harus berakhiran /exec).');
   }
@@ -308,7 +543,13 @@ export async function fetchStaffFromWebhook(
     );
   }
 
-  let parsed: { ok?: boolean; petugas?: SpreadsheetPetugasRawRow[]; error?: string };
+  let parsed: {
+    ok?: boolean;
+    version?: number;
+    supportsPetugasOps?: boolean;
+    petugas?: SpreadsheetPetugasRawRow[];
+    error?: string;
+  };
   try {
     parsed = JSON.parse(text);
   } catch {
@@ -321,117 +562,272 @@ export async function fetchStaffFromWebhook(
     throw new Error(parsed.error || 'Gagal membaca tab petugas dari Google Spreadsheet.');
   }
 
-  return Array.isArray(parsed.petugas) ? parsed.petugas : [];
+  return {
+    petugas: Array.isArray(parsed.petugas) ? parsed.petugas : [],
+    supportsPetugasOps: Boolean(parsed.supportsPetugasOps || (parsed.version && parsed.version >= 2)),
+  };
+}
+
+export async function fetchStaffFromWebhook(
+  webhookUrl: string
+): Promise<SpreadsheetPetugasRawRow[]> {
+  const res = await fetchStaffMetaFromWebhook(webhookUrl);
+  return res.petugas;
 }
 
 const EMAIL_KEY_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+const ROMAN_DUSUN: Record<string, DusunCode> = {
+  I: 'D1',
+  '1': 'D1',
+  II: 'D2',
+  '2': 'D2',
+  III: 'D3',
+  '3': 'D3',
+  IV: 'D4',
+  '4': 'D4',
+  V: 'D5',
+  '5': 'D5',
+};
+
+export interface ParsedSpreadsheetStaffRow {
+  email: string;
+  name: string;
+  role: UserRole;
+  assignedRTs: string[];
+  active: boolean;
+  koordinatorEmail?: string;
+  rtRawText: string;
+  hasRtError: boolean;
+  explicitClearRt: boolean;
+}
 
 export function parseSpreadsheetStaffRows(
   rawRows: SpreadsheetPetugasRawRow[],
   wilayah: WilayahConfig
 ): {
-  validRows: {
-    email: string;
-    name: string;
-    role: UserRole;
-    assignedRTs: string[];
-    active: boolean;
-    koordinatorEmail?: string;
-  }[];
+  validRows: ParsedSpreadsheetStaffRow[];
   errors: string[];
 } {
   const validRtSet = new Set<string>();
   const rtsByRw = new Map<string, string[]>();
+  const rtsByRwNumber = new Map<string, string[]>();
+  const rwToDusun = new Map<string, DusunCode>();
   const rtsByDusun = new Map<DusunCode, string[]>();
+  const allValidRts: string[] = [];
 
   for (const m of wilayah.rwMappings) {
-    const rwKey = `${m.dusun}-${m.rw}`;
+    const rwPad = String(m.rw).padStart(2, '0');
+    const rwKey = `${m.dusun}-${rwPad}`;
     const list: string[] = [];
     for (let i = 1; i <= (m.jumlahRt || 0); i++) {
-      const rtKey = `${m.dusun}-${m.rw}-${String(i).padStart(2, '0')}`;
+      const rtKey = `${m.dusun}-${rwPad}-${String(i).padStart(2, '0')}`;
       validRtSet.add(rtKey);
+      allValidRts.push(rtKey);
       list.push(rtKey);
       const dList = rtsByDusun.get(m.dusun) || [];
       dList.push(rtKey);
       rtsByDusun.set(m.dusun, dList);
     }
     rtsByRw.set(rwKey, list);
+    const existingByRwNum = rtsByRwNumber.get(rwPad) || [];
+    rtsByRwNumber.set(rwPad, [...existingByRwNum, ...list]);
+    rwToDusun.set(rwPad, m.dusun);
   }
 
-  const dedupMap = new Map<
-    string,
-    {
-      email: string;
-      name: string;
-      role: UserRole;
-      assignedRTs: string[];
-      active: boolean;
-      koordinatorEmail?: string;
-    }
-  >();
+  const dedupMap = new Map<string, ParsedSpreadsheetStaffRow>();
   const errors: string[] = [];
 
   rawRows.forEach((raw, idx) => {
     const rowNum = idx + 2;
-    const emailRaw = String(raw.email || '').trim().toLowerCase();
+    const norm = normalizeRawRowFields(raw);
+    const emailRaw = pickRawField(norm, ['email', 'e_mail', 'alamat_email']).trim().toLowerCase();
     if (!emailRaw) return;
     if (!EMAIL_KEY_REGEX.test(emailRaw) || emailRaw.length > 200) {
       errors.push(`Baris ${rowNum}: email "${emailRaw}" tidak valid.`);
       return;
     }
 
-    const nameRaw = String(raw.nama || raw.name || '').trim() || emailRaw.split('@')[0];
-    const roleRaw = String(raw.role || raw.peran || '').trim().toLowerCase();
+    const nameRaw =
+      pickRawField(norm, ['nama', 'name', 'nama_lengkap']).trim() || emailRaw.split('@')[0];
+    const roleRaw = pickRawField(norm, ['role', 'peran', 'jabatan']).trim().toLowerCase();
     let role: UserRole = 'enumerator';
     if (roleRaw === 'admin') {
       role = 'admin';
     } else if (roleRaw === 'koordinator' || roleRaw === 'koor' || roleRaw === 'dpl') {
       role = 'koordinator';
     } else if (roleRaw && roleRaw !== 'enumerator' && roleRaw !== 'enum' && roleRaw !== 'petugas') {
-      errors.push(`Baris ${rowNum} (${emailRaw}): role "${roleRaw}" harus admin, koordinator, atau enumerator.`);
+      errors.push(
+        `Baris ${rowNum} (${emailRaw}): role "${roleRaw}" harus admin, koordinator, atau enumerator.`
+      );
       return;
     }
 
-    const aktifRaw = String(raw.aktif ?? raw.active ?? raw.status ?? 'ya').trim().toLowerCase();
+    const aktifRaw = (pickRawField(norm, ['aktif', 'active', 'status']) || 'ya')
+      .trim()
+      .toLowerCase();
     const active = !['tidak', 'nonaktif', 'non-aktif', 'false', '0', 'no', 'n', 'off'].includes(
       aktifRaw
     );
 
-    const rtRaw = String(raw.rt_tugas || raw.assignedrts || raw.rt || '').trim();
-    const expandedRts: string[] = [];
-    if (role !== 'admin' && rtRaw && rtRaw.toLowerCase() !== 'semua') {
-      const tokens = rtRaw
-        .split(/[,;\n]+/)
-        .map((t) => t.trim().toUpperCase())
-        .filter(Boolean);
+    const rtRaw = pickRawField(norm, [
+      'rt_tugas',
+      'wilayah_tugas',
+      'wilayah',
+      'tugas_rt',
+      'penugasan_rt',
+      'assignedrts',
+      'assigned_rts',
+      'rt',
+      'rw',
+    ]).trim();
+    const rtLower = rtRaw.toLowerCase();
+    const explicitClearRt = ['-', 'kosong', 'clear', 'tidak ada', 'none', 'hapus'].includes(
+      rtLower
+    );
 
-      for (const tok of tokens) {
-        if (/^D[1-5]-\d{2}-\d{2}$/.test(tok)) {
-          if (validRtSet.has(tok)) {
-            expandedRts.push(tok);
-          } else {
-            errors.push(`Baris ${rowNum} (${emailRaw}): kode RT "${tok}" tidak ada di pemetaan wilayah.`);
+    const expandedRts: string[] = [];
+    let hasRtError = false;
+
+    if (role !== 'admin' && rtRaw && !explicitClearRt) {
+      if (rtLower === 'semua' || rtLower === 'all' || rtLower === 'seluruh desa') {
+        expandedRts.push(...allValidRts);
+      } else {
+        const tokens = rtRaw
+          .split(/[,;\n]+/)
+          .map((t) => t.trim().toUpperCase())
+          .filter(Boolean);
+
+        for (const tok of tokens) {
+          // 1. Rentang RT, mis. D1-01-01 s/d D1-01-05 atau D1-01-01 - D1-01-05
+          const rangeMatch = /^(D[1-5])[.\-\s]+(\d{1,2})[.\-\s]+(\d{1,2})\s*(?:S\/?D|-|\.\.|SAMPAI)\s*(?:D[1-5][.\-\s]+\d{1,2}[.\-\s]+)?(\d{1,2})$/i.exec(
+            tok
+          );
+          if (rangeMatch) {
+            const dCode = rangeMatch[1].toUpperCase() as DusunCode;
+            const rwPad = rangeMatch[2].padStart(2, '0');
+            const startRt = parseInt(rangeMatch[3], 10);
+            const endRt = parseInt(rangeMatch[4], 10);
+            if (startRt <= endRt && endRt <= 99) {
+              let foundAny = false;
+              for (let n = startRt; n <= endRt; n++) {
+                const candidate = `${dCode}-${rwPad}-${String(n).padStart(2, '0')}`;
+                if (validRtSet.has(candidate)) {
+                  expandedRts.push(candidate);
+                  foundAny = true;
+                }
+              }
+              if (!foundAny) {
+                hasRtError = true;
+                errors.push(`Baris ${rowNum} (${emailRaw}): rentang RT "${tok}" tidak valid pada pemetaan wilayah.`);
+              }
+            } else {
+              hasRtError = true;
+              errors.push(`Baris ${rowNum} (${emailRaw}): rentang RT "${tok}" tidak valid.`);
+            }
+            continue;
           }
-        } else if (/^D[1-5]-\d{2}(-\*)?$/.test(tok)) {
-          const rwKey = tok.replace(/-\*$/, '');
-          const rwRts = rtsByRw.get(rwKey) || [];
-          if (rwRts.length > 0) {
-            expandedRts.push(...rwRts);
-          } else {
-            errors.push(`Baris ${rowNum} (${emailRaw}): RW "${rwKey}" tidak ditemukan di pemetaan wilayah.`);
+
+          // 2. Kode RT lengkap (mendukung pemisah -, ., spasi dan angka tanpa 0 di depan: D1-1-1 -> D1-01-01)
+          const fullRtMatch = /^(D[1-5])[.\-\s]+(\d{1,2})[.\-\s]+(\d{1,2})$/.exec(tok);
+          if (fullRtMatch) {
+            const candidate = `${fullRtMatch[1]}-${fullRtMatch[2].padStart(2, '0')}-${fullRtMatch[3].padStart(2, '0')}`;
+            if (validRtSet.has(candidate)) {
+              expandedRts.push(candidate);
+            } else {
+              hasRtError = true;
+              errors.push(
+                `Baris ${rowNum} (${emailRaw}): kode RT "${tok}" (${candidate}) tidak ada di pemetaan wilayah.`
+              );
+            }
+            continue;
           }
-        } else if (/^D[1-5](-\*)?$/.test(tok)) {
-          const dusunCode = tok.replace(/-\*$/, '') as DusunCode;
-          const dRts = rtsByDusun.get(dusunCode) || [];
-          expandedRts.push(...dRts);
-        } else {
-          errors.push(`Baris ${rowNum} (${emailRaw}): format RT "${tok}" tidak dikenali (gunakan mis. D1-01-01 atau D1-01).`);
+
+          // 3. Kode RW + Dusun (mis. D1-01, D1-1, D1-01-*, D1 RW 01, D1-RW01)
+          const rwWithDusunMatch = /^(D[1-5])[.\-\s]+(?:RW\s*)?(\d{1,2})(?:[.\-\s]*\*)?$/.exec(tok);
+          if (rwWithDusunMatch) {
+            const rwKey = `${rwWithDusunMatch[1]}-${rwWithDusunMatch[2].padStart(2, '0')}`;
+            const rwRts = rtsByRw.get(rwKey) || [];
+            if (rwRts.length > 0) {
+              expandedRts.push(...rwRts);
+            } else {
+              hasRtError = true;
+              errors.push(
+                `Baris ${rowNum} (${emailRaw}): RW "${rwKey}" tidak ditemukan di pemetaan wilayah.`
+              );
+            }
+            continue;
+          }
+
+          // 4. Format "RT 01 RW 01" atau "RW 01 RT 01"
+          const rtRwMatch =
+            /^RT\s*(\d{1,2})[\s/\-,]+RW\s*(\d{1,2})$/.exec(tok) ||
+            /^RW\s*(\d{1,2})[\s/\-,]+RT\s*(\d{1,2})$/.exec(tok);
+          if (rtRwMatch) {
+            const isRtFirst = tok.startsWith('RT');
+            const rtPad = (isRtFirst ? rtRwMatch[1] : rtRwMatch[2]).padStart(2, '0');
+            const rwPad = (isRtFirst ? rtRwMatch[2] : rtRwMatch[1]).padStart(2, '0');
+            const dCode = rwToDusun.get(rwPad);
+            const candidate = dCode ? `${dCode}-${rwPad}-${rtPad}` : '';
+            if (candidate && validRtSet.has(candidate)) {
+              expandedRts.push(candidate);
+            } else {
+              hasRtError = true;
+              errors.push(
+                `Baris ${rowNum} (${emailRaw}): "${tok}" tidak cocok dengan pemetaan RT/RW desa.`
+              );
+            }
+            continue;
+          }
+
+          // 5. Format RW saja (mis. "RW 01", "RW01", "RW 1")
+          const rwOnlyMatch = /^RW\s*(\d{1,2})(?:[.\-\s]*\*)?$/.exec(tok);
+          if (rwOnlyMatch) {
+            const rwPad = rwOnlyMatch[1].padStart(2, '0');
+            const rwRts = rtsByRwNumber.get(rwPad) || [];
+            if (rwRts.length > 0) {
+              expandedRts.push(...rwRts);
+            } else {
+              hasRtError = true;
+              errors.push(
+                `Baris ${rowNum} (${emailRaw}): RW "${rwPad}" tidak ditemukan di pemetaan wilayah.`
+              );
+            }
+            continue;
+          }
+
+          // 6. Kode Dusun (mis. D1, D1-*, DUSUN 1, DUSUN I)
+          const dusunMatch =
+            /^(D[1-5])(?:[.\-\s]*\*)?$/.exec(tok) ||
+            /^DUSUN\s+([1-5]|I{1,3}|IV|V)$/.exec(tok);
+          if (dusunMatch) {
+            const rawD = dusunMatch[1];
+            const dCode = (rawD.startsWith('D') ? rawD : ROMAN_DUSUN[rawD]) as DusunCode | undefined;
+            const dRts = dCode ? rtsByDusun.get(dCode) || [] : [];
+            if (dRts.length > 0) {
+              expandedRts.push(...dRts);
+            } else {
+              hasRtError = true;
+              errors.push(`Baris ${rowNum} (${emailRaw}): Dusun "${tok}" tidak ditemukan.`);
+            }
+            continue;
+          }
+
+          hasRtError = true;
+          errors.push(
+            `Baris ${rowNum} (${emailRaw}): format RT "${tok}" tidak dikenali (gunakan mis. D1-01-01, D1-01, atau RW 01).`
+          );
         }
       }
     }
 
     const assignedRTs = Array.from(new Set(expandedRts)).slice(0, 120);
-    const koorEmail = String(raw.koordinator_email || raw.koordinatoremail || '')
+    const koorEmail = pickRawField(norm, [
+      'koordinator_email',
+      'koordinatoremail',
+      'email_koordinator',
+      'koordinator',
+    ])
       .trim()
       .toLowerCase();
 
@@ -442,6 +838,9 @@ export function parseSpreadsheetStaffRows(
       assignedRTs,
       active,
       ...(koorEmail && EMAIL_KEY_REGEX.test(koorEmail) ? { koordinatorEmail: koorEmail } : {}),
+      rtRawText: rtRaw,
+      hasRtError,
+      explicitClearRt,
     });
   });
 

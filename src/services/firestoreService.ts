@@ -37,6 +37,7 @@ import { cleanCensusData, computeJsonDiffs, stripUndefined } from '../utils/xlsf
 import {
   appendSubmissionViaWebhook,
   fetchStaffFromWebhook,
+  isHouseholdSubmittedForSheet,
   parseSpreadsheetStaffRows,
 } from './googleSheetsService';
 import {
@@ -1241,7 +1242,12 @@ export async function flushOfflineSyncQueue(params: {
         }
       }
 
-      if (isFirestoreOk && !isSheetOk && spreadsheetConfig?.webhookUrl) {
+      if (
+        isFirestoreOk &&
+        !isSheetOk &&
+        spreadsheetConfig?.webhookUrl &&
+        isHouseholdSubmittedForSheet(currentItem.optimisticHousehold)
+      ) {
         try {
           await appendSubmissionViaWebhook({
             webhookUrl: spreadsheetConfig.webhookUrl,
@@ -1269,10 +1275,10 @@ export async function flushOfflineSyncQueue(params: {
     }
   }
 
-  // Juga kirim data sensus milik petugas (atau semua untuk admin) yang sudah masuk Firestore namun sheetSynced === false
+  // Juga kirim data sensus milik petugas (atau semua untuk admin) yang sudah dikirim (bukan draf) masuk Firestore namun sheetSynced === false
   if (spreadsheetConfig?.webhookUrl) {
     const unsyncedHouseholds = households.filter((h) => {
-      if (!h.submittedAt || h.sheetSynced) return false;
+      if (!isHouseholdSubmittedForSheet(h) || h.sheetSynced) return false;
       if (processedSheetIds.has(h.id_rt)) return false;
       if (syncedSheetIdsInSession?.has(h.id_rt)) return false;
       if (actorRole === 'admin') return true;
@@ -1466,6 +1472,7 @@ export interface StaffSyncResult {
   updated: number;
   removed: number;
   unchanged: number;
+  preservedRtCount: number;
   totalSheetRows: number;
   errors: string[];
   emptySheet: boolean;
@@ -1478,6 +1485,7 @@ export async function syncStaffMembersFromSpreadsheet(params: {
   actorRole: UserRole;
   actorAssignedRTs?: string[];
   replaceRemoved?: boolean;
+  preserveBlankRt?: boolean;
 }): Promise<StaffSyncResult> {
   const {
     webhookUrl,
@@ -1485,7 +1493,8 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     actorEmail,
     actorRole,
     actorAssignedRTs = [],
-    replaceRemoved = true,
+    replaceRemoved = false,
+    preserveBlankRt = true,
   } = params;
 
   const rawRows = await fetchStaffFromWebhook(webhookUrl);
@@ -1493,34 +1502,13 @@ export async function syncStaffMembersFromSpreadsheet(params: {
 
   const actorLower = actorEmail.trim().toLowerCase();
   const actorRtSet = new Set(actorAssignedRTs);
-  const scopedRows =
-    actorRole === 'koordinator'
-      ? validRows.filter((r) => {
-          if (r.role !== 'enumerator') return false;
-          const rowKoor = (r.koordinatorEmail || '').trim().toLowerCase();
-          if (rowKoor && rowKoor !== actorLower) return false;
-          return r.assignedRTs.length > 0 && r.assignedRTs.every((rt) => actorRtSet.has(rt));
-        })
-      : validRows;
-
-  if (scopedRows.length === 0) {
-    return {
-      created: 0,
-      updated: 0,
-      removed: 0,
-      unchanged: 0,
-      totalSheetRows: 0,
-      errors,
-      emptySheet: true,
-    };
-  }
 
   const staffCol = collection(db, 'staff_members');
   const existingSnap = await getDocs(
     actorRole === 'admin' ? staffCol : query(staffCol, where('role', '==', 'enumerator'))
   );
 
-  const existingMap = new Map<string, Record<string, any>>();
+  const existingMap = new Map<string, StaffMember>();
   for (const d of existingSnap.docs) {
     const data = d.data() as StaffMember;
     if (
@@ -1535,6 +1523,35 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     existingMap.set(d.id.toLowerCase(), data);
   }
 
+  const scopedRows =
+    actorRole === 'koordinator'
+      ? validRows.filter((r) => {
+          if (r.role !== 'enumerator') return false;
+          const rowKoor = (r.koordinatorEmail || '').trim().toLowerCase();
+          if (rowKoor && rowKoor !== actorLower) return false;
+          const prev = existingMap.get(r.email.toLowerCase());
+          const candidateRts =
+            (r.hasRtError || (r.rtRawText === '' && !r.explicitClearRt && preserveBlankRt)) &&
+            prev
+              ? prev.assignedRTs || []
+              : r.assignedRTs;
+          return candidateRts.length > 0 && candidateRts.every((rt) => actorRtSet.has(rt));
+        })
+      : validRows;
+
+  if (scopedRows.length === 0) {
+    return {
+      created: 0,
+      updated: 0,
+      removed: 0,
+      unchanged: 0,
+      preservedRtCount: 0,
+      totalSheetRows: 0,
+      errors,
+      emptySheet: true,
+    };
+  }
+
   type BatchOp =
     | { kind: 'set'; email: string; payload: Record<string, any> }
     | { kind: 'delete'; email: string };
@@ -1544,6 +1561,7 @@ export async function syncStaffMembersFromSpreadsheet(params: {
   let updated = 0;
   let removed = 0;
   let unchanged = 0;
+  let preservedRtCount = 0;
 
   const targetEmailSet = new Set<string>();
 
@@ -1556,20 +1574,42 @@ export async function syncStaffMembersFromSpreadsheet(params: {
       emailLower === BOOTSTRAP_ADMIN_EMAIL ? 'admin' : row.role;
     const effectiveActive =
       emailLower === BOOTSTRAP_ADMIN_EMAIL ? true : row.active;
-    const effectiveRts =
-      effectiveRole === 'admin' ? [] : [...row.assignedRTs].slice(0, 120);
 
     const prev = existingMap.get(emailLower);
+    const prevRtsArr = Array.isArray(prev?.assignedRTs) ? prev.assignedRTs : [];
+
+    let effectiveRts: string[];
+    if (effectiveRole === 'admin') {
+      effectiveRts = [];
+    } else if (prev && row.hasRtError) {
+      // Jangan pernah mereset wilayah tugas jika format di Spreadsheet salah ketik
+      effectiveRts = [...prevRtsArr].slice(0, 120);
+      if (prevRtsArr.length > 0) preservedRtCount++;
+    } else if (prev && row.rtRawText === '' && !row.explicitClearRt && preserveBlankRt) {
+      // Jika kolom rt_tugas kosong di Spreadsheet, pertahankan penugasan RT yang sudah ada di aplikasi
+      effectiveRts = [...prevRtsArr].slice(0, 120);
+      if (prevRtsArr.length > 0) preservedRtCount++;
+    } else if (row.explicitClearRt) {
+      if (actorRole === 'koordinator' && prev) {
+        effectiveRts = [...prevRtsArr].slice(0, 120);
+        if (prevRtsArr.length > 0) preservedRtCount++;
+      } else {
+        effectiveRts = [];
+      }
+    } else {
+      effectiveRts = [...row.assignedRTs].slice(0, 120);
+    }
+
     const nextSortedRts = [...effectiveRts].sort().join(',');
 
     if (prev) {
-      const prevRts = Array.isArray(prev.assignedRTs)
-        ? [...prev.assignedRTs].sort().join(',')
-        : '';
+      const prevRts = [...prevRtsArr].sort().join(',');
       const prevKoor = (prev.koordinatorEmail || '').toLowerCase();
       const nextKoor =
-        row.koordinatorEmail ||
-        (actorRole === 'koordinator' ? prevKoor || actorLower : '');
+        effectiveRole === 'enumerator'
+          ? row.koordinatorEmail ||
+            (actorRole === 'koordinator' ? prevKoor || actorLower : prevKoor)
+          : '';
 
       const isSame =
         prev.name === row.name &&
@@ -1599,7 +1639,9 @@ export async function syncStaffMembersFromSpreadsheet(params: {
       updated++;
     } else {
       const nextKoor =
-        row.koordinatorEmail || (actorRole === 'koordinator' ? actorLower : '');
+        effectiveRole === 'enumerator'
+          ? row.koordinatorEmail || (actorRole === 'koordinator' ? actorLower : '')
+          : '';
       const payload: Record<string, any> = {
         email: emailLower,
         name: row.name,
@@ -1617,7 +1659,8 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     }
   }
 
-  if (actorRole === 'admin' && replaceRemoved) {
+  // Penghapusan otomatis hanya dijalankan bila tidak ada galat pembacaan baris agar tidak menghapus massal secara tidak sengaja
+  if (actorRole === 'admin' && replaceRemoved && errors.length === 0) {
     for (const [existingEmail] of existingMap) {
       if (
         existingEmail !== BOOTSTRAP_ADMIN_EMAIL &&
@@ -1651,6 +1694,7 @@ export async function syncStaffMembersFromSpreadsheet(params: {
     updated,
     removed,
     unchanged,
+    preservedRtCount,
     totalSheetRows: scopedRows.length,
     errors,
     emptySheet: false,

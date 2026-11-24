@@ -4,7 +4,7 @@
 1. **Akses Terbatas Petugas Terdaftar**: Pengguna yang emailnya tidak terdaftar aktif di `staff_members` (selain admin bootstrap `arisriswanto057@gmail.com`) tidak dapat membaca atau menulis koleksi mana pun.
 2. **Isolasi Wilayah (RBAC + RT Scoping)**:
    - `admin`: akses penuh ke konfigurasi wilayah, manajemen petugas (admin, koordinator, enumerator), verifikasi hasil sensus (`terverifikasi` / `dikembalikan`), seluruh rumah tangga, PII, kunjungan, dan log revisi.
-   - `koordinator`: dapat membaca, menambah, dan mengirim/memperbarui data sensus pada `assignedRTs` miliknya (tanpa mengubah status menjadi `terverifikasi`), serta mendaftarkan/mengubah petugas dengan `role == 'enumerator'`. Tidak dapat mempromosikan diri atau orang lain menjadi `admin` atau `koordinator`.
+   - `koordinator`: dapat membaca, menambah, dan mengirim/memperbarui data sensus pada `assignedRTs` miliknya (tanpa mengubah status menjadi `terverifikasi`), serta mendaftarkan, mengubah, dan menghapus petugas dengan `role == 'enumerator'` yang berada di dalam `assignedRTs` wilayahnya sendiri. Tidak dapat mempromosikan diri atau orang lain menjadi `admin` atau `koordinator`, dan tidak dapat mengelola enumerator di RW/wilayah lain.
    - `enumerator`: dapat membaca, menambah, dan mengirim/memperbarui data sensus beserta foto, PII, dan log kunjungan pada `assignedRTs` miliknya. Tidak dapat menandai isian sebagai `terverifikasi` (verifikasi dilakukan oleh `admin`).
 3. **Imutabilitas ID dan Riwayat**:
    - Dokumen `households` tidak pernah dapat dihapus (`allow delete: if false`).

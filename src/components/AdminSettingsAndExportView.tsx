@@ -33,6 +33,7 @@ import {
 import {
   APPS_SCRIPT_TEMPLATE,
   clearAllDataViaWebhook,
+  isHouseholdSubmittedForSheet,
   isValidAppsScriptUrl,
   syncAllDataViaWebhook,
 } from '../services/googleSheetsService';
@@ -155,6 +156,11 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
     }
   };
 
+  const submittedHouseholds = households.filter(isHouseholdSubmittedForSheet);
+  const submittedIds = new Set(submittedHouseholds.map((h) => h.id_rt));
+  const submittedVisits = visits.filter((v) => submittedIds.has(v.id_rt));
+  const submittedLogs = revisionLogs.filter((l) => submittedIds.has(l.id_rt));
+
   const handleSyncAllConfirmed = async () => {
     setConfirmSyncAll(false);
     if (!spreadsheetConfig?.webhookUrl) return;
@@ -170,7 +176,9 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
         revisionLogs,
       });
 
-      const unsynced = households.filter((h) => h.submittedAt && !h.sheetSynced);
+      const unsynced = households.filter(
+        (h) => isHouseholdSubmittedForSheet(h) && !h.sheetSynced
+      );
       for (const h of unsynced) {
         await markHouseholdSheetSynced(h.id_rt);
       }
@@ -185,7 +193,7 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
       });
 
       setSheetsMsg(
-        `Berhasil mengirim ${households.length} rumah tangga, ${visits.length} kunjungan, dan ${revisionLogs.length} log revisi ke Google Spreadsheet.`
+        `Berhasil mengirim ${submittedHouseholds.length} rumah tangga terkirim, ${submittedVisits.length} kunjungan, dan ${submittedLogs.length} log revisi ke Google Spreadsheet (data berstatus draf/belum dikunjungi tidak dimasukkan).`
       );
     } catch (e: any) {
       setSheetsErr(e?.message || 'Gagal menyinkronkan data ke Google Spreadsheet.');
@@ -290,7 +298,9 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
     }
   };
 
-  const pendingSyncCount = households.filter((h) => h.submittedAt && !h.sheetSynced).length;
+  const pendingSyncCount = households.filter(
+    (h) => isHouseholdSubmittedForSheet(h) && !h.sheetSynced
+  ).length;
 
   return (
     <div className="space-y-4">
@@ -988,8 +998,9 @@ export const AdminSettingsAndExportView: React.FC<AdminSettingsAndExportViewProp
             </h3>
             <p className="mt-2 text-sm leading-relaxed text-slate-700">
               Operasi ini akan memperbarui 5 tab pada &ldquo;{spreadsheetConfig?.title}&rdquo;
-              dengan {households.length} baris rumah tangga, {visits.length} baris kunjungan, dan{' '}
-              {revisionLogs.length} baris log revisi terbaru.
+              dengan {submittedHouseholds.length} baris rumah tangga terkirim,{' '}
+              {submittedVisits.length} baris kunjungan, dan {submittedLogs.length} baris log revisi
+              terbaru (data berstatus draf atau belum dikunjungi tidak dimasukkan ke Spreadsheet).
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
